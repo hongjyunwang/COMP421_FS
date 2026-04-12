@@ -33,6 +33,204 @@ enum {
     YFS_REQ_SHUTDOWN
 };
 
+// ======================== Free List Nodes and Operations =========================
+typedef struct free_node {
+    int num; // inode number for inode list, block number for data list
+    struct free_node *next;
+} free_node_t;
+
+// each node holds a single inode number. Each number represents an inode number that is free
+static free_node_t *free_inode_list = NULL;
+// each node holds a single block number. Each number represents a disk block that is free
+static free_node_t *free_block_list = NULL;
+
+static int num_blocks_total  = 0;
+static int num_inodes_total  = 0;
+static int first_data_block  = 0;
+
+// Push a number onto a free list.
+static void push_free(free_node_t **list, int num) {
+    free_node_t *node = malloc(sizeof(free_node_t));
+    if (!node) {
+        TracePrintf(0, "fs_init: malloc failed\n");
+        Exit(ERROR);
+    }
+    node->num  = num;
+    node->next = *list;
+    *list = node;
+}
+ 
+// Pop a number from a free list. Returns -1 if empty.
+int pop_free(free_node_t **list) {
+    if (!*list) return -1;
+    free_node_t *node = *list;
+    int num = node->num;
+    *list = node->next;
+    free(node);
+    return num;
+}
+
+int alloc_inode_num(void) { return pop_free(&free_inode_list); }
+int alloc_block_num(void) { return pop_free(&free_block_list); }
+void free_inode_num(int inum) { push_free(&free_inode_list, inum); }
+void free_block_num(int blkno) { push_free(&free_block_list, blkno); }
+
+
+// Wrapper around ReadSector that mallocs a fresh BLOCKSIZE buffer, reads the sector into it, and returns the pointer.
+static void *read_block(int blockno) {
+    void *buf = malloc(BLOCKSIZE);
+    if (!buf) {
+        TracePrintf(0, "fs_init: malloc failed reading block %d\n", blockno);
+        Exit(ERROR);
+    }
+    if (ReadSector(blockno, buf) == ERROR) {
+        TracePrintf(0, "fs_init: ReadSector(%d) failed\n", blockno);
+        Exit(ERROR);
+    }
+    return buf;
+}
+
+// This is called for every live (non-free) inode during the scan. Its job is to stamp used[block_number] = 1 
+// for every block that inode owns, so those blocks don't end up on the free block list.
+static void mark_inode_blocks(struct inode *in, char *used) {
+    if (in->size <= 0) return;
+ 
+    // How many data blocks does this inode actually need?
+    int num_data_blocks = (in->size + BLOCKSIZE - 1) / BLOCKSIZE;
+ 
+    // Mark direct blocks.
+    int d;
+    for (d = 0; d < NUM_DIRECT && d < num_data_blocks; d++) {
+        int blk = in->direct[d];
+        if (blk > 0 && blk < num_blocks_total) {
+            used[blk] = 1;
+        }
+    }
+ 
+    // If we need more than NUM_DIRECT blocks, there is an indirect block.
+    if (num_data_blocks > NUM_DIRECT) {
+        int indirect_blk = in->indirect;
+        if (indirect_blk > 0 && indirect_blk < num_blocks_total) {
+            used[indirect_blk] = 1; // the indirect block itself
+ 
+            // Read the indirect block to find the data blocks it points to
+            int *indirect_buf = read_block(indirect_blk);
+ 
+            int num_indirect = num_data_blocks - NUM_DIRECT;
+            int i;
+            for (i = 0; i < num_indirect; i++) {
+                int blk = indirect_buf[i];
+                if (blk > 0 && blk < num_blocks_total) {
+                    used[blk] = 1;
+                }
+            }
+            free(indirect_buf);
+        }
+    }
+}
+
+// ======================== Initialization Function =========================
+void fs_init(void) {
+    /* Step 1: read the file-system header from block 1 */
+ 
+    void *block1_buf = read_block(1);
+    struct fs_header *hdr = (struct fs_header *)block1_buf;
+ 
+    num_blocks_total = hdr->num_blocks;
+    num_inodes_total = hdr->num_inodes;
+    TracePrintf(1, "fs_init: num_blocks=%d  num_inodes=%d\n",
+                num_blocks_total, num_inodes_total);
+ 
+    /*
+     * Inodes per block = BLOCKSIZE / INODESIZE = 512 / 64 = 8.
+     * Block 1 holds the fs_header (slot 0) plus up to 7 inodes.
+     * Total slots (header + inodes) = num_inodes + 1.
+     * Number of blocks occupied by header+inodes: ceil((num_inodes + 1) / inodes_per_block)
+     */
+    int inodes_per_block = BLOCKSIZE / INODESIZE; //8
+    int inode_blocks = (num_inodes_total + 1 + inodes_per_block - 1) / inodes_per_block;
+ 
+    first_data_block = 1 + inode_blocks;
+    TracePrintf(1, "fs_init: inode_blocks=%d  first_data_block=%d\n",
+                inode_blocks, first_data_block);
+ 
+
+    /* Step 2: allocate a bitmap for data blocks */
+    
+    /*
+     * used[i] == 1 means block i is already allocated to some inode.
+     * We start by marking the boot block, all inode blocks as used
+     * (they are never free data blocks).
+     */
+    char *used = calloc(num_blocks_total, sizeof(char));
+    if (!used) {
+        TracePrintf(0, "fs_init: calloc for used[] failed\n");
+        Exit(ERROR);
+    }
+    // Fill in 1 for boot block (0) and all inode-holding blocks
+    int i;
+    for (i = 0; i < first_data_block; i++) {
+        used[i] = 1;
+    }
+ 
+    /* Step 3: scan every inode to determine free and used ones, build inode list*/
+ 
+    /*
+     * Block number for inode N = 1 + (N / inodes_per_block)
+     * Slot within that block = N % inodes_per_block
+     * Byte offset within block = slot * INODESIZE
+     */
+ 
+    int current_iblock = -1; // which inode-block is currently loaded
+    void *iblock_buf = NULL; // buffer for current inode block
+ 
+    int inum;
+    for (inum = 1; inum <= num_inodes_total; inum++) {
+ 
+        int iblock = 1 + (inum / inodes_per_block);
+        int islot  =      inum % inodes_per_block;
+ 
+        // Load the inode block if we haven't already.
+        if (iblock != current_iblock) {
+            free(iblock_buf);
+            iblock_buf     = read_block(iblock);
+            current_iblock = iblock;
+        }
+ 
+        struct inode *in = (struct inode *)iblock_buf + islot;
+
+        if (in->type == INODE_FREE) {
+            // This inode is available for allocation.
+            push_free(&free_inode_list, inum);
+            TracePrintf(3, "fs_init: inode %d is FREE\n", inum);
+        } else {
+            // Live inode — mark the blocks it owns as used.
+            TracePrintf(3, "fs_init: inode %d type=%d size=%d\n", inum, in->type, in->size);
+            mark_inode_blocks(in, used);
+        }
+    }
+ 
+    free(iblock_buf);
+    free(block1_buf);
+ 
+    /* Step 4: build the free block list */
+ 
+    /*
+     * Any data block (first_data_block .. num_blocks_total-1) not in
+     * 'used' is free.  We iterate in reverse so that lower-numbered
+     * blocks end up at the head of the list (allocated first).
+     */
+    for (i = num_blocks_total - 1; i >= first_data_block; i--) {
+        if (!used[i]) {
+            push_free(&free_block_list, i);
+        }
+    }
+ 
+    free(used);
+ 
+    TracePrintf(1, "fs_init: initialisation complete. "  "Free inodes and blocks are ready.\n");
+}
+
 
 // ===== Handler prototypes =====
 static void handle_shutdown(int pid, struct yfs_msg *msg);
@@ -48,6 +246,8 @@ int main(int argc, char **argv) {
     }
 
     TracePrintf(1, "yfs: Registered as FILE_SERVER\n");
+
+    fs_init();
 
 
     //make first client process
