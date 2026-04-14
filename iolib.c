@@ -2,10 +2,26 @@
 #include <comp421/yalnix.h>
 #include <stddef.h>
 #include <comp421/filesystem.h>
+#include <stdlib.h>
 
 //need to update every call
 static int curdir_inum = ROOTINODE;
 static int curdir_reuse = 0;
+
+struct open_file {
+    int inum;
+    int reuse;
+    int offset;
+};
+
+static struct open_file *open_table[MAX_OPEN_FILES];
+
+static int alloc_fd(void) {
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (open_table[i] == NULL) return i;
+    }
+    return ERROR;
+}
 
 
 
@@ -39,29 +55,33 @@ enum {
     YFS_REQ_SHUTDOWN
 };
 
-int Shutdown(void) {
+int Open(char *pathname) {
     struct yfs_msg msg;
 
-    msg.type = YFS_REQ_SHUTDOWN;
-    msg.arg1 = 0;
-    msg.arg2 = 0;
-    msg.arg3 = 0;
-    msg.ptr1 = NULL;
-    msg.ptr2 = NULL;
+    msg.type = YFS_REQ_OPEN;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = curdir_reuse;
+    msg.ptr1 = pathname;
 
     if (Send(&msg, -FILE_SERVER) == ERROR) {
         return ERROR;
     }
 
-    return msg.arg1;
-}
+    if (msg.arg1 == ERROR) {
+        return ERROR;
+    }
 
-int Sync(void) {
-    struct yfs_msg msg;
-    msg.type = YFS_REQ_SYNC;
-    
-    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
-    return msg.arg1;
+    int fd = alloc_fd();
+    if (fd == ERROR) return ERROR;
+
+    struct open_file *of = malloc(sizeof(*of));
+    of->inum = msg.arg2;
+    of->reuse = msg.arg3;
+    of->offset = 0;
+
+    open_table[fd] = of;
+
+    return fd;
 }
 
 int Stat(char *pathname, struct Stat *statbuf) {
@@ -81,4 +101,30 @@ int Stat(char *pathname, struct Stat *statbuf) {
     }
 
     return msg.arg1;  // 0 or ERROR
+}
+
+
+int Sync(void) {
+    struct yfs_msg msg;
+    msg.type = YFS_REQ_SYNC;
+    
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    return msg.arg1;
+}
+
+int Shutdown(void) {
+    struct yfs_msg msg;
+
+    msg.type = YFS_REQ_SHUTDOWN;
+    msg.arg1 = 0;
+    msg.arg2 = 0;
+    msg.arg3 = 0;
+    msg.ptr1 = NULL;
+    msg.ptr2 = NULL;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) {
+        return ERROR;
+    }
+
+    return msg.arg1;
 }

@@ -15,6 +15,14 @@ int main(void) {
         printf("inum=%d type=%d size=%d nlink=%d\n", st.inum, st.type, st.size, st.nlink);
     }
 
+    int fd = Open("/");
+    int fd1 = Open("/");
+    int fd2 = Open("/");
+    printf("client: Open returned %d\n", fd);
+    printf("client: Open returned %d\n", fd1);
+    printf("client: Open returned %d\n", fd2);
+
+
     int z = Shutdown();
     printf("client: Shutdown returned %d\n", z);
     fflush(stdout);

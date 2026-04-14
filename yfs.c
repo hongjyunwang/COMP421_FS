@@ -271,6 +271,7 @@ void fs_init(void) {
 static void handle_shutdown(int pid, struct yfs_msg *msg);
 static void handle_sync(int pid, struct yfs_msg *msg);
 static void handle_stat(int pid, struct yfs_msg *msg);
+static void handle_open(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -319,6 +320,9 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
+            case YFS_REQ_OPEN:
+                handle_open(sender, &msg);
+                break;
             case YFS_REQ_STAT:
                 handle_stat(sender, &msg);
                 break;
@@ -337,6 +341,37 @@ int main(int argc, char **argv) {
     }
 
     return 0; // never reached
+}
+
+static void handle_open(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int inum;
+
+    if (lookup_path_v1(pathbuf, &inum) == ERROR) {
+        //msg->arg1 = ERROR;
+        //Reply(msg, pid);
+        return;
+    }
+
+    struct inode in;
+    if (load_inode(inum, &in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    msg->arg1 = 0;        // success
+    msg->arg2 = inum;
+    msg->arg3 = in.reuse;
+
+    Reply(msg, pid);
 }
 
 static void handle_stat(int pid, struct yfs_msg *msg) {
