@@ -138,8 +138,7 @@ void fs_init(void) {
  
     num_blocks_total = hdr->num_blocks;
     num_inodes_total = hdr->num_inodes;
-    TracePrintf(1, "fs_init: num_blocks=%d  num_inodes=%d\n",
-                num_blocks_total, num_inodes_total);
+    TracePrintf(1, "fs_init: num_blocks=%d  num_inodes=%d\n", num_blocks_total, num_inodes_total);
  
     /*
      * Inodes per block = BLOCKSIZE / INODESIZE = 512 / 64 = 8.
@@ -151,7 +150,7 @@ void fs_init(void) {
     int inode_blocks = (num_inodes_total + 1 + inodes_per_block - 1) / inodes_per_block;
  
     first_data_block = 1 + inode_blocks;
-    TracePrintf(1, "fs_init: inode_blocks=%d  first_data_block=%d\n",
+    TracePrintf(0, "fs_init: inode_blocks=%d  first_data_block=%d\n",
                 inode_blocks, first_data_block);
  
 
@@ -228,7 +227,7 @@ void fs_init(void) {
  
     free(used);
  
-    TracePrintf(1, "fs_init: initialisation complete. "  "Free inodes and blocks are ready.\n");
+    TracePrintf(0, "fs_init: initialisation complete. "  "Free inodes and blocks are ready.\n");
 }
 
 
