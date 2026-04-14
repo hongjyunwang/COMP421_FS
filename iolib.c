@@ -84,6 +84,21 @@ int Open(char *pathname) {
     return fd;
 }
 
+int Close(int fd) {
+    if (fd < 0 || fd >= MAX_OPEN_FILES) {
+        return ERROR;
+    }
+
+    if (open_table[fd] == NULL) {
+        return ERROR;
+    }
+
+    free(open_table[fd]);
+    open_table[fd] = NULL;
+
+    return 0;
+}
+
 int Stat(char *pathname, struct Stat *statbuf) {
     struct yfs_msg msg;
 

@@ -17,10 +17,18 @@ int main(void) {
 
     int fd = Open("/");
     int fd1 = Open("/");
-    int fd2 = Open("/");
     printf("client: Open returned %d\n", fd);
     printf("client: Open returned %d\n", fd1);
-    printf("client: Open returned %d\n", fd2);
+
+    int r1 = Close(fd);
+    int r2 = Close(fd1);
+    int r3 = Close(fd1);
+    printf("client: Close returned %d\n", r1);
+    printf("client: Close returned %d\n", r2);
+    printf("client: Close returned %d\n", r3);
+
+
+
 
 
     int z = Shutdown();
