@@ -3,8 +3,10 @@
 #include <stdio.h>
 
 int main(void) {
-    int r = Shutdown();
-    printf("client: Shutdown returned %d\n", r);
+    int a = Sync();
+    printf("client: Sync returned %d\n", a);
+    int b = Shutdown();
+    printf("client: Shutdown returned %d\n", b);
     fflush(stdout);
     Exit(0);
 }

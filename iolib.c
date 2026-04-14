@@ -49,3 +49,11 @@ int Shutdown(void) {
 
     return msg.arg1;
 }
+
+int Sync(void) {
+    struct yfs_msg msg;
+    msg.type = YFS_REQ_SYNC;
+    
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    return msg.arg1;
+}

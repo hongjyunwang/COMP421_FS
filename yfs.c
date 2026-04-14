@@ -233,6 +233,8 @@ void fs_init(void) {
 
 // ===== Handler prototypes =====
 static void handle_shutdown(int pid, struct yfs_msg *msg);
+static void handle_sync(int pid, struct yfs_msg *msg);
+
 //TODO: add other handlers
 
 
@@ -261,7 +263,6 @@ int main(int argc, char **argv) {
         }
     }
 
-
     //server loop
     while (1) {
         struct yfs_msg msg;
@@ -281,11 +282,12 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
-
+            case YFS_REQ_SYNC:
+                handle_sync(sender, &msg);
+                break;
             case YFS_REQ_SHUTDOWN:
                 handle_shutdown(sender, &msg);
                 break;
-
             default:
                 TracePrintf(0, "yfs: Unknown request %d\n", msg.type);
                 msg.arg1 = ERROR;
@@ -306,4 +308,11 @@ static void handle_shutdown(int pid, struct yfs_msg *msg) {
     Reply(msg, pid);
 
     Exit(0);
+}
+
+static void handle_sync(int pid, struct yfs_msg *msg) {
+    msg->arg1 = 0;
+    //TODO: write all dirty cached inodes back to their corresponding disk blocks (in the cache) and
+    //then writes all dirty cached disk blocks to the disk.
+    Reply(msg, pid);
 }
