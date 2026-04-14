@@ -1,5 +1,6 @@
 #include <comp421/filesystem.h>
 #include <comp421/yalnix.h>
+#include <comp421/iolib.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -129,6 +130,41 @@ static void mark_inode_blocks(struct inode *in, char *used) {
     }
 }
 
+//========================= Helpers ===========================
+int load_inode(int inum, struct inode *out) {
+    if (out == NULL) {
+        return ERROR;
+    }
+
+    if (inum < 1 || inum > num_inodes_total) {
+        return ERROR;
+    }
+
+    int inodes_per_block = BLOCKSIZE / INODESIZE;
+
+    int iblock = 1 + (inum / inodes_per_block);
+    int islot  = inum % inodes_per_block;
+
+    void *iblock_buf = read_block(iblock);
+    if (iblock_buf == NULL) {
+        return ERROR;
+    }
+
+    struct inode *inode_array = (struct inode *)iblock_buf;
+    *out = inode_array[islot];
+
+    free(iblock_buf);
+    return 0;
+}
+
+int lookup_path_v1(const char *path, int *out_inum) {
+    if (path[0] == '/' && path[1] == '\0') {
+        *out_inum = ROOTINODE;
+        return 0;
+    }
+    return ERROR;
+}
+
 // ======================== Initialization Function =========================
 void fs_init(void) {
     /* Step 1: read the file-system header from block 1 */
@@ -234,6 +270,7 @@ void fs_init(void) {
 // ===== Handler prototypes =====
 static void handle_shutdown(int pid, struct yfs_msg *msg);
 static void handle_sync(int pid, struct yfs_msg *msg);
+static void handle_stat(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -282,6 +319,9 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
+            case YFS_REQ_STAT:
+                handle_stat(sender, &msg);
+                break;
             case YFS_REQ_SYNC:
                 handle_sync(sender, &msg);
                 break;
@@ -299,6 +339,59 @@ int main(int argc, char **argv) {
     return 0; // never reached
 }
 
+static void handle_stat(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    //copy pathname from client
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int inum;
+
+    //Resolve pathname, get inode#
+    if (lookup_path_v1(pathbuf, &inum) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    //Load inode
+    struct inode in;
+    if (load_inode(inum, &in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    //Build Stat struct
+    struct Stat st;
+    st.inum  = inum;
+    st.type  = in.type;
+    st.size  = in.size;
+    st.nlink = in.nlink;
+
+    //Copy result back to client
+    if (CopyTo(pid, msg->ptr2, &st, sizeof(st)) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    //Reply success
+    msg->arg1 = 0;
+    Reply(msg, pid);
+}
+
+static void handle_sync(int pid, struct yfs_msg *msg) {
+    msg->arg1 = 0;
+    //TODO: write all dirty cached inodes back to their corresponding disk blocks (in the cache) and
+    //then writes all dirty cached disk blocks to the disk.
+    Reply(msg, pid);
+}
+
 static void handle_shutdown(int pid, struct yfs_msg *msg) {
     TracePrintf(0, "yfs: shutting down\n");
 
@@ -308,11 +401,4 @@ static void handle_shutdown(int pid, struct yfs_msg *msg) {
     Reply(msg, pid);
 
     Exit(0);
-}
-
-static void handle_sync(int pid, struct yfs_msg *msg) {
-    msg->arg1 = 0;
-    //TODO: write all dirty cached inodes back to their corresponding disk blocks (in the cache) and
-    //then writes all dirty cached disk blocks to the disk.
-    Reply(msg, pid);
 }

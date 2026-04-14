@@ -1,6 +1,12 @@
 #include <comp421/iolib.h>
 #include <comp421/yalnix.h>
 #include <stddef.h>
+#include <comp421/filesystem.h>
+
+//need to update every call
+static int curdir_inum = ROOTINODE;
+static int curdir_reuse = 0;
+
 
 
 //32-byte message struct
@@ -56,4 +62,23 @@ int Sync(void) {
     
     if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
     return msg.arg1;
+}
+
+int Stat(char *pathname, struct Stat *statbuf) {
+    struct yfs_msg msg;
+
+    msg.type = YFS_REQ_STAT;
+
+    msg.arg1 = curdir_inum;    //cd's inode#
+    msg.arg2 = curdir_reuse;   //# reuse
+    msg.arg3 = 0;
+
+    msg.ptr1 = pathname;       // input
+    msg.ptr2 = statbuf;        // output buffer
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) {
+        return ERROR;
+    }
+
+    return msg.arg1;  // 0 or ERROR
 }
