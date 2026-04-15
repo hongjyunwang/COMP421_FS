@@ -1,30 +1,38 @@
 #include <comp421/iolib.h>
 #include <comp421/yalnix.h>
 #include <stdio.h>
-int main(void) {
+
+static void test_stat(const char *path) {
     struct Stat st;
+    int r = Stat((char *)path, &st);
 
-    if (Stat("/", &st) != ERROR)
-        printf("/ -> inum %d\n", st.inum);
-
-    if (Stat("/a", &st) != ERROR)
-        printf("/a -> inum %d\n", st.inum);
-
-
-    if (Stat("/a/b", &st) != ERROR)
-        printf("/a/b -> inum %d\n", st.inum);
-  
-    if (Stat("/a/./b", &st) != ERROR)
-        printf("/a/./b -> inum %d\n", st.inum);
-
-    if (Stat("/a/b/..", &st) != ERROR)
-        printf("/a/b/.. -> inum %d\n", st.inum);
-
-    if (Stat("/nosuch", &st) == ERROR)
-        printf("/nosuch -> ERROR\n");
-
+    if (r == ERROR) {
+        printf("%s -> ERROR\n", path);
+    } else {
+        printf("%s -> inum %d\n", path, st.inum);
+    }
     fflush(stdout);
+}
+int main(void) {
+    
+    test_stat("/");
+    test_stat("/a");
+    test_stat("/a/b");
+    test_stat("/a/./b");
+    test_stat("/a/b/..");
+    test_stat("/nosuch");
+
+    test_stat("/a/.");
+    test_stat("/a/..");
+    test_stat("/a/b/.");
+    test_stat("/a/b/../..");
+    test_stat("/..");
+    test_stat("/a//b");
+    test_stat("/a/b/");
+    test_stat("");
+
+
 
     Shutdown();
-    return 0;
+    Exit(0);
 }

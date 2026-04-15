@@ -126,8 +126,7 @@ main(int argc, char **argv)
         unlink(DISK_FILE_NAME);
         exit(1);
     }
-
-    /* root directory: ".", "..", "a" */
+        /* root directory: ".", "..", "a" */
     memset((void *)root, '\0', sizeof(root));
     root[0].inum = ROOTINODE;
     root[0].name[0] = '.';
@@ -139,7 +138,9 @@ main(int argc, char **argv)
     root[2].inum = 2;
     root[2].name[0] = 'a';
 
-    if (write(disk, root, sizeof(root)) != sizeof(root)) {
+    memset((void *)&block, '\0', BLOCKSIZE);
+    memcpy(block.buf, root, sizeof(root));
+    if (write(disk, &block, BLOCKSIZE) != BLOCKSIZE) {
         perror("write root");
         unlink(DISK_FILE_NAME);
         exit(1);
@@ -157,7 +158,9 @@ main(int argc, char **argv)
     dir_a[2].inum = 3;
     dir_a[2].name[0] = 'b';
 
-    if (write(disk, dir_a, sizeof(dir_a)) != sizeof(dir_a)) {
+    memset((void *)&block, '\0', BLOCKSIZE);
+    memcpy(block.buf, dir_a, sizeof(dir_a));
+    if (write(disk, &block, BLOCKSIZE) != BLOCKSIZE) {
         perror("write dir_a");
         unlink(DISK_FILE_NAME);
         exit(1);
@@ -171,6 +174,15 @@ main(int argc, char **argv)
     dir_b[1].inum = 2;
     dir_b[1].name[0] = '.';
     dir_b[1].name[1] = '.';
+
+    memset((void *)&block, '\0', BLOCKSIZE);
+    memcpy(block.buf, dir_b, sizeof(dir_b));
+    if (write(disk, &block, BLOCKSIZE) != BLOCKSIZE) {
+        perror("write dir_b");
+        unlink(DISK_FILE_NAME);
+        exit(1);
+    }
+    
 
     if (write(disk, dir_b, sizeof(dir_b)) != sizeof(dir_b)) {
         perror("write dir_b");

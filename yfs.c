@@ -191,9 +191,14 @@ static int dir_lookup(int dir_inum, const char *name, int namelen) {
     if (load_inode(dir_inum, &dir_in) == ERROR) return ERROR;
     if (dir_in.type != INODE_DIRECTORY) return ERROR;
 
+    TracePrintf(0, "dir_lookup: dir_inum=%d name='%.*s'\n", dir_inum, namelen, name);
+    TracePrintf(0, "dir inode: type=%d size=%d\n", dir_in.type, dir_in.size);
+
     int total_entries    = dir_in.size / sizeof(struct dir_entry);
     int entries_per_block = BLOCKSIZE  / sizeof(struct dir_entry);
     char block_buf[BLOCKSIZE];
+
+    TracePrintf(0, "total_entries=%d entries_per_block=%d\n", total_entries, entries_per_block);
 
     for (int i = 0; i < total_entries; i++) {
         // only read a new block when we cross a block boundary
@@ -210,6 +215,8 @@ static int dir_lookup(int dir_inum, const char *name, int namelen) {
         if (namelen > DIRNAMELEN) continue;
         if (memcmp(ent->name, name, namelen) != 0) continue;
         if (namelen < DIRNAMELEN && ent->name[namelen] != '\0') continue;
+
+        TracePrintf(0, "entry %d: inum=%d name='%.*s'\n", i, ent->inum, DIRNAMELEN, ent->name);
 
         return ent->inum;
     }
@@ -234,6 +241,8 @@ int lookup_path(const char *path, int cwd_inum, int symlink_depth, int follow_la
     while (*p == '/') p++;   // skip leading slashes
     if (*p == '\0') return cur_inum;  // path was just "/"
 
+    TracePrintf(0, "lookup_path: path='%s' start=%d\n", path, cur_inum);
+
     while (*p != '\0') {
         // each iteration extracts one component
 
@@ -249,15 +258,23 @@ int lookup_path(const char *path, int cwd_inum, int symlink_depth, int follow_la
         int trailing_slash = (p != q && is_last); // slashes at end of path
         p = q; // advance past slashes
 
+        TracePrintf(0, "component='%.*s' cur_inum=%d is_last=%d trailing=%d\n",
+            complen, start, cur_inum, is_last, trailing_slash);
+
         if (complen > DIRNAMELEN) return ERROR;
         int next_inum = dir_lookup(cur_inum, start, complen);
         if (next_inum == ERROR) return ERROR;
 
+        TracePrintf(0, "dir_lookup returned next_inum=%d\n", next_inum);
+
         struct inode next_in;
         if (load_inode(next_inum, &next_in) == ERROR) return ERROR;
 
+        TracePrintf(0, "next inode: type=%d size=%d\n", next_in.type, next_in.size);
+
         // handle symlinks
         if (next_in.type == INODE_SYMLINK) {
+            TracePrintf(0, "SYMLINK\n");
             // don't follow if it's the last component with no trailing slash and follow_last=0
             if (is_last && !trailing_slash && !follow_last)
                 return next_inum;
@@ -295,6 +312,7 @@ int lookup_path(const char *path, int cwd_inum, int symlink_depth, int follow_la
                 return lookup_path(p, resolved, symlink_depth, follow_last);
             }
         }
+        
 
         // intermediate components must be directories
         if (!is_last || trailing_slash) {
@@ -501,8 +519,8 @@ static void handle_open(int pid, struct yfs_msg *msg) {
     int inum;
 
     if ((inum = lookup_path(pathbuf, msg->arg1, 0, 0)) == ERROR) {
-        //msg->arg1 = ERROR;
-        //Reply(msg, pid);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
         return;
     }
 
