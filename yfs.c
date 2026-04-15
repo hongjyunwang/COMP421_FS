@@ -3,6 +3,7 @@
 #include <comp421/iolib.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 //32-byte message struct
 struct yfs_msg {
@@ -157,6 +158,32 @@ static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
     return ReadSector(blkno, buf);
 }
 
+//========================= Helpers ===========================
+int load_inode(int inum, struct inode *out) {
+    if (out == NULL) {
+        return ERROR;
+    }
+
+    if (inum < 1 || inum > num_inodes_total) {
+        return ERROR;
+    }
+
+    int inodes_per_block = BLOCKSIZE / INODESIZE;
+
+    int iblock = 1 + (inum / inodes_per_block);
+    int islot  = inum % inodes_per_block;
+
+    void *iblock_buf = read_block(iblock);
+    if (iblock_buf == NULL) {
+        return ERROR;
+    }
+
+    struct inode *inode_array = (struct inode *)iblock_buf;
+    *out = inode_array[islot];
+
+    free(iblock_buf);
+    return 0;
+}
 // Search directory inode `dir_inum` for a component `name` of length `namelen`.
 // Returns inode number on success, ERROR if not found.
 static int dir_lookup(int dir_inum, const char *name, int namelen) {
@@ -189,40 +216,6 @@ static int dir_lookup(int dir_inum, const char *name, int namelen) {
     return ERROR;
 }
 
-//========================= Helpers ===========================
-int load_inode(int inum, struct inode *out) {
-    if (out == NULL) {
-        return ERROR;
-    }
-
-    if (inum < 1 || inum > num_inodes_total) {
-        return ERROR;
-    }
-
-    int inodes_per_block = BLOCKSIZE / INODESIZE;
-
-    int iblock = 1 + (inum / inodes_per_block);
-    int islot  = inum % inodes_per_block;
-
-    void *iblock_buf = read_block(iblock);
-    if (iblock_buf == NULL) {
-        return ERROR;
-    }
-
-    struct inode *inode_array = (struct inode *)iblock_buf;
-    *out = inode_array[islot];
-
-    free(iblock_buf);
-    return 0;
-}
-
-// int lookup_path_v1(const char *path, int *out_inum) {
-//     if (path[0] == '/' && path[1] == '\0') {
-//         *out_inum = ROOTINODE;
-//         return 0;
-//     }
-//     return ERROR;
-// }
 
 // Full path lookup.
 // cwd_inum:      starting directory for relative paths
