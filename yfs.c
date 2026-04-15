@@ -130,6 +130,65 @@ static void mark_inode_blocks(struct inode *in, char *used) {
     }
 }
 
+// Read the blk_idx-th logical data block of inode `in` into `buf`.
+// Handles direct blocks, indirect blocks, and holes (zero-filled).
+static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
+    int blkno;
+
+    if (blk_idx < NUM_DIRECT) {
+        blkno = in->direct[blk_idx];
+    } else {
+        if (in->indirect == 0) {
+            memset(buf, 0, BLOCKSIZE);
+            return 0;
+        }
+        int *indirect_buf = read_block(in->indirect);
+        if (!indirect_buf) return ERROR;
+        blkno = indirect_buf[blk_idx - NUM_DIRECT];
+        free(indirect_buf);
+    }
+
+    if (blkno == 0) {
+        // hole in file
+        memset(buf, 0, BLOCKSIZE);
+        return 0;
+    }
+
+    return ReadSector(blkno, buf);
+}
+
+// Search directory inode `dir_inum` for a component `name` of length `namelen`.
+// Returns inode number on success, ERROR if not found.
+static int dir_lookup(int dir_inum, const char *name, int namelen) {
+    struct inode dir_in;
+    if (load_inode(dir_inum, &dir_in) == ERROR) return ERROR;
+    if (dir_in.type != INODE_DIRECTORY) return ERROR;
+
+    int total_entries    = dir_in.size / sizeof(struct dir_entry);
+    int entries_per_block = BLOCKSIZE  / sizeof(struct dir_entry);
+    char block_buf[BLOCKSIZE];
+
+    for (int i = 0; i < total_entries; i++) {
+        // only read a new block when we cross a block boundary
+        if (i % entries_per_block == 0) {
+            if (inode_read_block(&dir_in, i / entries_per_block, block_buf) == ERROR)
+                return ERROR;
+        }
+
+        struct dir_entry *ent = (struct dir_entry *)block_buf + (i % entries_per_block);
+        if (ent->inum == 0) continue; // free entry, skip
+
+        // names are NOT null-terminated when exactly DIRNAMELEN chars long
+        // so we can't use strcmp — use memcmp + manual length check
+        if (namelen > DIRNAMELEN) continue;
+        if (memcmp(ent->name, name, namelen) != 0) continue;
+        if (namelen < DIRNAMELEN && ent->name[namelen] != '\0') continue;
+
+        return ent->inum;
+    }
+    return ERROR;
+}
+
 //========================= Helpers ===========================
 int load_inode(int inum, struct inode *out) {
     if (out == NULL) {
@@ -157,12 +216,106 @@ int load_inode(int inum, struct inode *out) {
     return 0;
 }
 
-int lookup_path_v1(const char *path, int *out_inum) {
-    if (path[0] == '/' && path[1] == '\0') {
-        *out_inum = ROOTINODE;
-        return 0;
+// int lookup_path_v1(const char *path, int *out_inum) {
+//     if (path[0] == '/' && path[1] == '\0') {
+//         *out_inum = ROOTINODE;
+//         return 0;
+//     }
+//     return ERROR;
+// }
+
+// Full path lookup.
+// cwd_inum:      starting directory for relative paths
+// symlink_depth: tracks recursion for MAXSYMLINKS enforcement (pass 0 from callers)
+// follow_last:   1 = follow symlink at last component (Open, Create, ChDir)
+//                0 = return symlink inode itself    (Unlink, ReadLink, etc.)
+// Returns inode number on success, ERROR on failure.
+int lookup_path(const char *path, int cwd_inum, int symlink_depth, int follow_last) {
+    // Error checking
+    if (path == NULL || path[0] == '\0') return ERROR;
+    if (symlink_depth > MAXSYMLINKS) return ERROR;
+
+    // setup
+    int cur_inum = (path[0] == '/') ? ROOTINODE : cwd_inum;
+    const char *p = path;
+    while (*p == '/') p++;   // skip leading slashes
+    if (*p == '\0') return cur_inum;  // path was just "/"
+
+    while (*p != '\0') {
+        // each iteration extracts one component
+
+        // extract next component
+        const char *start = p;
+        while (*p != '/' && *p != '\0') p++;
+        int complen = p - start;
+
+        // peek past any slashes following this component
+        const char *q = p;
+        while (*q == '/') q++;
+        int is_last = (*q == '\0'); // true if there is nothing after the slashes
+        int trailing_slash = (p != q && is_last); // slashes at end of path
+        p = q; // advance past slashes
+
+        if (complen > DIRNAMELEN) return ERROR;
+        int next_inum = dir_lookup(cur_inum, start, complen);
+        if (next_inum == ERROR) return ERROR;
+
+        struct inode next_in;
+        if (load_inode(next_inum, &next_in) == ERROR) return ERROR;
+
+        // handle symlinks
+        if (next_in.type == INODE_SYMLINK) {
+            // don't follow if it's the last component with no trailing slash and follow_last=0
+            if (is_last && !trailing_slash && !follow_last)
+                return next_inum;
+
+            if (symlink_depth >= MAXSYMLINKS) return ERROR;
+
+            // read the symlink target out of its data blocks
+            char target[MAXPATHNAMELEN];
+            int len = next_in.size;
+            if (len <= 0 || len >= MAXPATHNAMELEN) return ERROR;
+
+            char block_buf[BLOCKSIZE];
+            int bytes_read = 0, blk_idx = 0;
+            while (bytes_read < len) {
+                if (inode_read_block(&next_in, blk_idx++, block_buf) == ERROR)
+                    return ERROR;
+                int to_copy = len - bytes_read;
+                if (to_copy > BLOCKSIZE) to_copy = BLOCKSIZE;
+                memcpy(target + bytes_read, block_buf, to_copy);
+                bytes_read += to_copy;
+            }
+            target[len] = '\0';
+
+            // relative symlink targets are resolved from the directory
+            // that contains the symlink, not from cwd
+            int symlink_base = (target[0] == '/') ? ROOTINODE : cur_inum;
+
+            if (is_last) {
+                // nothing remains after symlink — resolve target fully
+                return lookup_path(target, symlink_base, symlink_depth + 1, follow_last);
+            } else {
+                // more path remains after symlink — resolve target, then continue
+                int resolved = lookup_path(target, symlink_base, symlink_depth + 1, 1);
+                if (resolved == ERROR) return ERROR;
+                return lookup_path(p, resolved, symlink_depth, follow_last);
+            }
+        }
+
+        // intermediate components must be directories
+        if (!is_last || trailing_slash) {
+            if (next_in.type != INODE_DIRECTORY) return ERROR;
+        }
+
+        cur_inum = next_inum;
+
+        // spec: trailing slash = treat as if followed by "."
+        // "." maps to cur_inum, which we've already verified is a directory
+        if (trailing_slash) return cur_inum;
     }
-    return ERROR;
+
+    return cur_inum;
 }
 
 // ======================== Initialization Function =========================
@@ -354,7 +507,7 @@ static void handle_open(int pid, struct yfs_msg *msg) {
 
     int inum;
 
-    if (lookup_path_v1(pathbuf, &inum) == ERROR) {
+    if ((inum = lookup_path(pathbuf, msg->arg1, 0, 0)) == ERROR) {
         //msg->arg1 = ERROR;
         //Reply(msg, pid);
         return;
@@ -387,7 +540,7 @@ static void handle_stat(int pid, struct yfs_msg *msg) {
     int inum;
 
     //Resolve pathname, get inode#
-    if (lookup_path_v1(pathbuf, &inum) == ERROR) {
+    if ((inum = lookup_path(pathbuf, msg->arg1, 0, 1)) == ERROR) {
         msg->arg1 = ERROR;
         Reply(msg, pid);
         return;
