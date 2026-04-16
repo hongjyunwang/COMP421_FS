@@ -49,7 +49,8 @@ main(int argc, char **argv)
     /* testcase directories */
     struct dir_entry root[3];
     struct dir_entry dir_a[3];
-    struct dir_entry dir_b[2];
+    struct dir_entry dir_b[3];
+    const char file_data[] = "hello yfs\n";
 
     int first_dir_block;
 
@@ -108,15 +109,25 @@ main(int argc, char **argv)
 
     /*
      * inode 3 = /a/b
-     * contents: ".", ".."
+     * contents: ".", "..", "f"
      */
     inodes[3].type = INODE_DIRECTORY;
     inodes[3].nlink = 2;
     inodes[3].reuse = 1;
-    inodes[3].size = 2 * sizeof(struct dir_entry);
+    inodes[3].size = 3 * sizeof(struct dir_entry);
     inodes[3].direct[0] = first_dir_block + 2;
 
-    for (i = 4; i <= num_inodes; i++) {
+    /*
+     * inode 4 = /a/b/f
+     * contents: "hello yfs\n"
+     */
+    inodes[4].type = INODE_REGULAR;
+    inodes[4].nlink = 1;
+    inodes[4].reuse = 1;
+    inodes[4].size = sizeof(file_data) - 1;   /* exclude terminating '\0' */
+    inodes[4].direct[0] = first_dir_block + 3;
+
+    for (i = 5; i <= num_inodes; i++) {
         inodes[i].type = INODE_FREE;
         /* all other fields already 0 from memset */
     }
@@ -166,7 +177,7 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    /* /a/b directory: ".", ".." */
+    /* /a/b directory: ".", "..", "f" */
     memset((void *)dir_b, '\0', sizeof(dir_b));
     dir_b[0].inum = 3;
     dir_b[0].name[0] = '.';
@@ -175,6 +186,9 @@ main(int argc, char **argv)
     dir_b[1].name[0] = '.';
     dir_b[1].name[1] = '.';
 
+    dir_b[2].inum = 4;
+    dir_b[2].name[0] = 'f';
+
     memset((void *)&block, '\0', BLOCKSIZE);
     memcpy(block.buf, dir_b, sizeof(dir_b));
     if (write(disk, &block, BLOCKSIZE) != BLOCKSIZE) {
@@ -182,10 +196,12 @@ main(int argc, char **argv)
         unlink(DISK_FILE_NAME);
         exit(1);
     }
-    
 
-    if (write(disk, dir_b, sizeof(dir_b)) != sizeof(dir_b)) {
-        perror("write dir_b");
+    /* /a/b/f file contents: "hello yfs\n" */
+    memset((void *)&block, '\0', BLOCKSIZE);
+    memcpy(block.buf, file_data, sizeof(file_data) - 1);
+    if (write(disk, &block, BLOCKSIZE) != BLOCKSIZE) {
+        perror("write file data");
         unlink(DISK_FILE_NAME);
         exit(1);
     }
@@ -206,7 +222,7 @@ main(int argc, char **argv)
         unlink(DISK_FILE_NAME);
         exit(1);
     }
-    printf("Done setting up mkyfs_tes\n");
+    printf("Done setting up mkyfs_test\n");
     fflush(stdout);
 
     exit(0);

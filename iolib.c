@@ -57,6 +57,41 @@ enum {
     YFS_REQ_GETFSIZE
 };
 
+int Read(int fd, void *buf, int size){
+
+    if(fd < 0 || fd >= MAX_OPEN_FILES){
+        return ERROR;
+    }
+
+    if(open_table[fd] == NULL){
+        return ERROR;
+    }
+
+    if(size < 0){
+        return ERROR;
+    }
+
+    struct yfs_msg msg;
+
+    msg.type = YFS_REQ_READ;
+    msg.arg1 = open_table[fd]->inum;
+    msg.arg2 = open_table[fd]->offset;
+    msg.arg3 = size;
+    msg.ptr1 = buf;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) {
+        return ERROR;
+    }
+
+    if (msg.arg1 == ERROR) {
+        return ERROR;
+    }
+    
+    // server returns bytes_read in arg1
+    open_table[fd]->offset += msg.arg1;
+    return msg.arg1;
+}
+
 int Open(char *pathname) {
     struct yfs_msg msg;
 

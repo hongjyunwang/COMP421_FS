@@ -133,6 +133,8 @@ static void mark_inode_blocks(struct inode *in, char *used) {
     }
 }
 
+//========================= Helpers ===========================
+
 // Read the blk_idx-th logical data block of inode `in` into `buf`.
 // Handles direct blocks, indirect blocks, and holes (zero-filled).
 static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
@@ -160,7 +162,48 @@ static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
     return ReadSector(blkno, buf);
 }
 
-//========================= Helpers ===========================
+static int inode_read_bytes(struct inode *in, int offset, char *dst, int len) {
+    if (in == NULL || dst == NULL) {
+        return ERROR;
+    }
+
+    if (offset < 0 || len < 0) {
+        return ERROR;
+    }
+
+    if (offset > in->size) {
+        return ERROR;
+    }
+
+    if (offset + len > in->size) {
+        return ERROR;
+    }
+
+    int copied = 0;
+    char block_buf[BLOCKSIZE];
+
+    while (copied < len) {
+        int abs_off = offset + copied;
+        int blk_idx = abs_off / BLOCKSIZE;
+        int blk_off = abs_off % BLOCKSIZE;
+
+        if (inode_read_block(in, blk_idx, block_buf) == ERROR) {
+            return ERROR;
+        }
+
+        int chunk = len - copied;
+        int space_in_block = BLOCKSIZE - blk_off;
+        if (chunk > space_in_block) {
+            chunk = space_in_block;
+        }
+
+        memcpy(dst + copied, block_buf + blk_off, chunk);
+        copied += chunk;
+    }
+
+    return 0;
+}
+
 int load_inode(int inum, struct inode *out) {
     if (out == NULL) {
         return ERROR;
@@ -438,6 +481,7 @@ static void handle_shutdown(int pid, struct yfs_msg *msg);
 static void handle_sync(int pid, struct yfs_msg *msg);
 static void handle_stat(int pid, struct yfs_msg *msg);
 static void handle_open(int pid, struct yfs_msg *msg);
+static void handle_read(int pid, struct yfs_msg *msg);
 static void handle_getfsize(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
@@ -487,6 +531,9 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
+            case YFS_REQ_READ:
+                handle_read(sender, &msg);
+                break;
             case YFS_REQ_OPEN:
                 handle_open(sender, &msg);
                 break;
@@ -511,6 +558,64 @@ int main(int argc, char **argv) {
     }
 
     return 0; // never reached
+}
+
+static void handle_read(int pid, struct yfs_msg *msg){
+    
+    int inum = msg->arg1;
+    int offset = msg->arg2;
+    int size = msg->arg3;
+    void *client_buf = msg->ptr1;
+
+    if (size < 0 || offset < 0) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode in;
+    if (load_inode(inum, &in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int bytes_left = in.size - offset;
+    if (bytes_left <= 0) {
+        msg->arg1 = 0;   // EOF
+        Reply(msg, pid);
+        return;
+    }
+
+    int bytes_to_read = size;
+    if (bytes_to_read > bytes_left) {
+        bytes_to_read = bytes_left;
+    }
+
+    char *tmp = malloc(bytes_to_read);
+    if(tmp == NULL){
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (inode_read_bytes(&in, offset, tmp, bytes_to_read) == ERROR) {
+        free(tmp);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (CopyTo(pid, client_buf, tmp, bytes_to_read) == ERROR) {
+        free(tmp);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    free(tmp);
+    msg->arg1 = bytes_to_read;
+    Reply(msg, pid);
 }
 
 static void handle_open(int pid, struct yfs_msg *msg) {
