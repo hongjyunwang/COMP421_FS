@@ -32,7 +32,9 @@ enum {
     YFS_REQ_CHDIR,
     YFS_REQ_STAT,
     YFS_REQ_SYNC,
-    YFS_REQ_SHUTDOWN
+    YFS_REQ_SHUTDOWN,
+    //helpers
+    YFS_REQ_GETFSIZE
 };
 
 // ======================== Free List Nodes and Operations =========================
@@ -436,6 +438,7 @@ static void handle_shutdown(int pid, struct yfs_msg *msg);
 static void handle_sync(int pid, struct yfs_msg *msg);
 static void handle_stat(int pid, struct yfs_msg *msg);
 static void handle_open(int pid, struct yfs_msg *msg);
+static void handle_getfsize(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -489,6 +492,9 @@ int main(int argc, char **argv) {
                 break;
             case YFS_REQ_STAT:
                 handle_stat(sender, &msg);
+                break;
+            case YFS_REQ_GETFSIZE:
+                handle_getfsize(sender, &msg);
                 break;
             case YFS_REQ_SYNC:
                 handle_sync(sender, &msg);
@@ -581,6 +587,20 @@ static void handle_stat(int pid, struct yfs_msg *msg) {
 
     //Reply success
     msg->arg1 = 0;
+    Reply(msg, pid);
+}
+
+static void handle_getfsize(int pid, struct yfs_msg *msg){
+    int inum = msg->arg1;
+
+    struct inode in;
+    if(load_inode(inum, &in) == ERROR){
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+    msg->arg1 = 0;//reply success
+    msg->arg2 = in.size;
     Reply(msg, pid);
 }
 

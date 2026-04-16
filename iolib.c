@@ -52,7 +52,9 @@ enum {
     YFS_REQ_CHDIR,
     YFS_REQ_STAT,
     YFS_REQ_SYNC,
-    YFS_REQ_SHUTDOWN
+    YFS_REQ_SHUTDOWN,
+    //helpers
+    YFS_REQ_GETFSIZE
 };
 
 int Open(char *pathname) {
@@ -97,6 +99,53 @@ int Close(int fd) {
     open_table[fd] = NULL;
 
     return 0;
+}
+
+int Seek(int fd, int offset, int whence){
+
+    if(fd < 0 || fd >= MAX_OPEN_FILES){
+        return ERROR;
+    }
+
+    if(open_table[fd] == NULL){
+        return ERROR;
+    }
+
+    int base;
+
+    if (whence == SEEK_SET){
+        base = 0;
+    }else if (whence == SEEK_CUR){
+        base = open_table[fd]->offset;
+    }else if (whence == SEEK_END){
+        //get file size
+        struct yfs_msg msg;
+        msg.type = YFS_REQ_GETFSIZE;
+        msg.arg1 = open_table[fd]->inum;
+
+        if(Send(&msg, -FILE_SERVER) == ERROR){
+            return ERROR;
+        }
+
+        if(msg.arg1 == ERROR){
+            return ERROR;
+        }
+        base = msg.arg2;
+    } else {
+        return ERROR;
+    }
+
+    int new_pos = base + offset;
+
+    if(new_pos < 0){
+        return ERROR;
+    }
+
+    //upddate pos
+    open_table[fd]->offset = new_pos;
+    
+    return new_pos;
+
 }
 
 int Stat(char *pathname, struct Stat *statbuf) {
