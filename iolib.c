@@ -57,6 +57,32 @@ enum {
     YFS_REQ_GETFSIZE
 };
 
+int MkDir(char *pathname) {
+    struct yfs_msg msg;
+    msg.type = YFS_REQ_MKDIR;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = curdir_reuse;
+    msg.arg3 = 0;
+    msg.ptr1 = pathname;
+    msg.ptr2 = NULL;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    return msg.arg1;
+}
+
+int RmDir(char *pathname) {
+    struct yfs_msg msg;
+    msg.type = YFS_REQ_RMDIR;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = curdir_reuse;
+    msg.arg3 = 0;
+    msg.ptr1 = pathname;
+    msg.ptr2 = NULL;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    return msg.arg1;
+}
+
 int Read(int fd, void *buf, int size){
 
     if(fd < 0 || fd >= MAX_OPEN_FILES){

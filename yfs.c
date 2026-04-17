@@ -592,6 +592,111 @@ int lookup_path(const char *path, int cwd_inum, int symlink_depth, int follow_la
     return cur_inum;
 }
 
+// Remove a directory entry from dir_inum.
+// Returns 0 on success, ERROR if not found or on failure.
+static int dir_remove_entry(int dir_inum, const char *name) {
+    struct inode dir_in;
+    if (load_inode(dir_inum, &dir_in) == ERROR) return ERROR;
+    if (dir_in.type != INODE_DIRECTORY) return ERROR;
+
+    int namelen = strlen(name);
+    if (namelen <= 0 || namelen > DIRNAMELEN) return ERROR;
+
+    int total_entries = dir_in.size / sizeof(struct dir_entry);
+    int entries_per_block = BLOCKSIZE / sizeof(struct dir_entry);
+    char block_buf[BLOCKSIZE];
+
+    for (int i = 0; i < total_entries; i++) {
+        int blk_idx = i / entries_per_block;
+        int blk_off = i % entries_per_block;
+
+        if (blk_off == 0) {
+            if (inode_read_block(&dir_in, blk_idx, block_buf) == ERROR)
+                return ERROR;
+        }
+
+        struct dir_entry *ent = (struct dir_entry *)block_buf + blk_off;
+        if (ent->inum == 0) continue;
+
+        if (memcmp(ent->name, name, namelen) != 0) continue;
+        if (namelen < DIRNAMELEN && ent->name[namelen] != '\0') continue;
+
+        ent->inum = 0;
+        memset(ent->name, 0, DIRNAMELEN);
+
+        return inode_write_block(&dir_in, blk_idx, block_buf);
+    }
+
+    return ERROR;
+}
+
+// Returns 1 if directory is empty except for "." and ".." and free entries.
+// Returns 0 if it contains anything else.
+// Returns ERROR on failure.
+static int dir_is_empty(int dir_inum) {
+    struct inode dir_in;
+    if (load_inode(dir_inum, &dir_in) == ERROR) return ERROR;
+    if (dir_in.type != INODE_DIRECTORY) return ERROR;
+
+    int total_entries = dir_in.size / sizeof(struct dir_entry);
+    int entries_per_block = BLOCKSIZE / sizeof(struct dir_entry);
+    char block_buf[BLOCKSIZE];
+
+    for (int i = 0; i < total_entries; i++) {
+        int blk_idx = i / entries_per_block;
+        int blk_off = i % entries_per_block;
+
+        if (blk_off == 0) {
+            if (inode_read_block(&dir_in, blk_idx, block_buf) == ERROR)
+                return ERROR;
+        }
+
+        struct dir_entry *ent = (struct dir_entry *)block_buf + blk_off;
+        if (ent->inum == 0) continue;
+
+        // "." ?
+        if (ent->name[0] == '.' && ent->name[1] == '\0') continue;
+
+        // ".." ?
+        if (ent->name[0] == '.' && ent->name[1] == '.' && ent->name[2] == '\0') continue;
+
+        return 0;   // found a real entry
+    }
+
+    return 1;   // only ".", "..", or free entries
+}
+
+// Resolve the parent directory of `path` and return the final component name.
+// On success:
+//   *parent_inum_out = inode number of parent directory
+//   name_out = final component
+// Returns 0 on success, ERROR on failure.
+static int lookup_parent(const char *path, int cwd_inum,
+                         int *parent_inum_out, char *name_out) {
+    if (path == NULL || parent_inum_out == NULL || name_out == NULL)
+        return ERROR;
+
+    char parent_path[MAXPATHNAMELEN];
+    char final_name[DIRNAMELEN + 1];
+
+    if (split_path(path, parent_path, final_name) == ERROR)
+        return ERROR;
+
+    int parent_inum = lookup_path(parent_path, cwd_inum, 0, 1);
+    if (parent_inum == ERROR)
+        return ERROR;
+
+    struct inode parent_in;
+    if (load_inode(parent_inum, &parent_in) == ERROR)
+        return ERROR;
+    if (parent_in.type != INODE_DIRECTORY)
+        return ERROR;
+
+    *parent_inum_out = parent_inum;
+    strcpy(name_out, final_name);
+    return 0;
+}
+
 // ======================== Initialization Function =========================
 void fs_init(void) {
     /* Step 1: read the file-system header from block 1 */
@@ -703,6 +808,8 @@ static void handle_read(int pid, struct yfs_msg *msg);
 static void handle_getfsize(int pid, struct yfs_msg *msg);
 static void handle_create(int pid, struct yfs_msg *msg);
 static void handle_write(int pid, struct yfs_msg *msg);
+static void handle_mkdir(int pid, struct yfs_msg *msg);
+static void handle_rmdir(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -751,6 +858,12 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
+            case YFS_REQ_MKDIR:
+                handle_mkdir(sender, &msg);
+                break;
+            case YFS_REQ_RMDIR:
+                handle_rmdir(sender, &msg);
+                break;
             case YFS_REQ_READ:
                 handle_read(sender, &msg);
                 break;
@@ -784,6 +897,201 @@ int main(int argc, char **argv) {
     }
 
     return 0; // never reached
+}
+
+static void handle_mkdir(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    int parent_inum;
+    char name[DIRNAMELEN + 1];
+    if (lookup_parent(pathbuf, cwd_inum, &parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (dir_lookup(parent_inum, name, strlen(name)) != ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int new_inum = alloc_inode_num();
+    if (new_inum == -1) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int new_blk = alloc_block_num();
+    if (new_blk == -1) {
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode new_dir;
+    memset(&new_dir, 0, sizeof(new_dir));
+    new_dir.type = INODE_DIRECTORY;
+    new_dir.nlink = 2;
+    new_dir.reuse = 1;   // or increment from prior value if you track old reuse
+    new_dir.size = 2 * sizeof(struct dir_entry);
+    new_dir.direct[0] = new_blk;
+
+    char block_buf[BLOCKSIZE];
+    memset(block_buf, 0, BLOCKSIZE);
+
+    struct dir_entry *ents = (struct dir_entry *)block_buf;
+    ents[0].inum = new_inum;
+    ents[0].name[0] = '.';
+
+    ents[1].inum = parent_inum;
+    ents[1].name[0] = '.';
+    ents[1].name[1] = '.';
+
+    if (WriteSector(new_blk, block_buf) == ERROR) {
+        free_block_num(new_blk);
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (save_inode(new_inum, &new_dir) == ERROR) {
+        free_block_num(new_blk);
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (dir_add_entry(parent_inum, new_inum, name) == ERROR) {
+        inode_free_blocks(&new_dir);
+        save_inode(new_inum, &new_dir);
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode parent_in;
+    if (load_inode(parent_inum, &parent_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+    parent_in.nlink++;
+    if (save_inode(parent_inum, &parent_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    msg->arg1 = 0;
+    Reply(msg, pid);
+}
+
+static void handle_rmdir(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    int parent_inum;
+    char name[DIRNAMELEN + 1];
+    if (lookup_parent(pathbuf, cwd_inum, &parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int target_inum = dir_lookup(parent_inum, name, strlen(name));
+    if (target_inum == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (target_inum == ROOTINODE) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode target_in;
+    if (load_inode(target_inum, &target_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (target_in.type != INODE_DIRECTORY) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int empty = dir_is_empty(target_inum);
+    if (empty != 1) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (dir_remove_entry(parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode parent_in;
+    if (load_inode(parent_inum, &parent_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+    parent_in.nlink--;
+    if (save_inode(parent_inum, &parent_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    inode_free_blocks(&target_in);
+    target_in.type = INODE_FREE;
+    target_in.nlink = 0;
+    target_in.size = 0;
+
+    if (save_inode(target_inum, &target_in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    free_inode_num(target_inum);
+
+    msg->arg1 = 0;
+    Reply(msg, pid);
 }
 
 static void handle_read(int pid, struct yfs_msg *msg){
