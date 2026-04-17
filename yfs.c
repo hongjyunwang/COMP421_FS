@@ -229,6 +229,89 @@ int load_inode(int inum, struct inode *out) {
     free(iblock_buf);
     return 0;
 }
+
+// Save a modified inode back to its disk block.
+static int save_inode(int inum, struct inode *in) {
+    int inodes_per_block = BLOCKSIZE / INODESIZE;
+    int iblock = 1 + (inum / inodes_per_block);
+    int islot  = inum % inodes_per_block;
+
+    void *iblock_buf = read_block(iblock);
+    if (!iblock_buf) return ERROR;
+
+    struct inode *inode_array = (struct inode *)iblock_buf;
+    inode_array[islot] = *in;
+
+    if (WriteSector(iblock, iblock_buf) == ERROR) {
+        free(iblock_buf);
+        return ERROR;
+    }
+    free(iblock_buf);
+    return 0;
+}
+
+// Write a full BLOCKSIZE buffer into the blk_idx-th logical data block
+// of inode `in`, allocating a new disk block if that slot was empty.
+// Also allocates and writes back the indirect block if needed.
+// Returns 0 on success, ERROR on failure.
+static int inode_write_block(struct inode *in, int blk_idx, void *buf) {
+    int max_blocks = NUM_DIRECT + BLOCKSIZE / (int)sizeof(int);
+    if (blk_idx >= max_blocks) return ERROR;
+
+    int blkno;
+
+    if (blk_idx < NUM_DIRECT) {
+        // Direct block path
+        if (in->direct[blk_idx] == 0) {
+            blkno = alloc_block_num();
+            if (blkno == ERROR) return ERROR;
+            in->direct[blk_idx] = blkno;
+        } else {
+            blkno = in->direct[blk_idx];
+        }
+        return WriteSector(blkno, buf);
+
+    } else {
+        // Indirect block path
+        int *indirect_buf;
+
+        if (in->indirect == 0) {
+            // Allocate the indirect block itself for the first time
+            int ind_blkno = alloc_block_num();
+            if (ind_blkno == ERROR) return ERROR;
+            in->indirect = ind_blkno;
+            indirect_buf = calloc(1, BLOCKSIZE); // zero all entries
+            if (!indirect_buf) return ERROR;
+        } else {
+            indirect_buf = read_block(in->indirect);
+            if (!indirect_buf) return ERROR;
+        }
+
+        int idx = blk_idx - NUM_DIRECT;
+
+        if (indirect_buf[idx] == 0) {
+            blkno = alloc_block_num();
+            if (blkno == ERROR) { free(indirect_buf); return ERROR; }
+            indirect_buf[idx] = blkno;
+        } else {
+            blkno = indirect_buf[idx];
+        }
+
+        // Write the data block first
+        if (WriteSector(blkno, buf) == ERROR) {
+            free(indirect_buf); return ERROR;
+        }
+
+        // Write the (possibly updated) indirect block back
+        if (WriteSector(in->indirect, indirect_buf) == ERROR) {
+            free(indirect_buf); return ERROR;
+        }
+
+        free(indirect_buf);
+        return 0;
+    }
+}
+
 // Search directory inode `dir_inum` for a component `name` of length `namelen`.
 // Returns inode number on success, ERROR if not found.
 static int dir_lookup(int dir_inum, const char *name, int namelen) {
@@ -267,6 +350,141 @@ static int dir_lookup(int dir_inum, const char *name, int namelen) {
     }
     return ERROR;
 }
+
+// Split `path` into parent directory and last component name.
+// parent_out must be MAXPATHNAMELEN bytes, name_out must be DIRNAMELEN+1 bytes.
+// Returns 0 on success, ERROR if path is empty or last component is invalid.
+static int split_path(const char *path, char *parent_out, char *name_out) {
+    int len = strlen(path);
+    if (len == 0) return ERROR;
+
+    // strip trailing slashes
+    while (len > 1 && path[len-1] == '/') len--;
+
+    // find last slash
+    int last_slash = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (path[i] == '/') { last_slash = i; break; }
+    }
+
+    const char *name_start;
+    int name_len;
+
+    if (last_slash == -1) {
+        // relative path — parent is current directory
+        strncpy(parent_out, ".", MAXPATHNAMELEN - 1);
+        parent_out[MAXPATHNAMELEN - 1] = '\0';
+        name_start = path;
+        name_len = len;
+    } else {
+        int parent_len = (last_slash == 0) ? 1 : last_slash;
+        if (parent_len >= MAXPATHNAMELEN) return ERROR;
+        memcpy(parent_out, path, parent_len);
+        parent_out[parent_len] = '\0';
+        name_start = path + last_slash + 1;
+        name_len = len - last_slash - 1;
+    }
+
+    if (name_len == 0 || name_len > DIRNAMELEN) return ERROR;
+    memcpy(name_out, name_start, name_len);
+    name_out[name_len] = '\0';
+    return 0;
+}
+
+// Add a directory entry to dir_inum, reusing a free slot if one exists,
+// otherwise appending a new entry. Returns 0 on success, ERROR on failure.
+static int dir_add_entry(int dir_inum, int new_inum, const char *name) {
+    struct inode dir_in;
+    if (load_inode(dir_inum, &dir_in) == ERROR) return ERROR;
+    if (dir_in.type != INODE_DIRECTORY) return ERROR;
+
+    int entries_per_block = BLOCKSIZE / sizeof(struct dir_entry);
+    int total_entries = dir_in.size / sizeof(struct dir_entry);
+    char block_buf[BLOCKSIZE];
+
+    // scan for a free slot (inum == 0)
+    int free_blk_idx = -1, free_blk_off = -1;
+    for (int i = 0; i < total_entries; i++) {
+        int blk_idx = i / entries_per_block;
+        int blk_off = i % entries_per_block;
+        if (blk_off == 0) {
+            if (inode_read_block(&dir_in, blk_idx, block_buf) == ERROR)
+                return ERROR;
+        }
+        struct dir_entry *ent = (struct dir_entry *)block_buf + blk_off;
+        if (ent->inum == 0) {
+            free_blk_idx = blk_idx;
+            free_blk_off = blk_off;
+            break;
+        }
+    }
+
+    if (free_blk_idx != -1) {
+        // reuse the free slot
+        if (inode_read_block(&dir_in, free_blk_idx, block_buf) == ERROR)
+            return ERROR;
+        struct dir_entry *ent = (struct dir_entry *)block_buf + free_blk_off;
+        ent->inum = new_inum;
+        memset(ent->name, 0, DIRNAMELEN);
+        strncpy(ent->name, name, DIRNAMELEN);
+        return inode_write_block(&dir_in, free_blk_idx, block_buf);
+    }
+
+    // no free slot (append)
+    int new_idx = total_entries;
+    int blk_idx = new_idx / entries_per_block;
+    int blk_off = new_idx % entries_per_block;
+
+    if (blk_off == 0) {
+        memset(block_buf, 0, BLOCKSIZE);
+    } else {
+        if (inode_read_block(&dir_in, blk_idx, block_buf) == ERROR)
+            return ERROR;
+    }
+
+    struct dir_entry *ent = (struct dir_entry *)block_buf + blk_off;
+    ent->inum = new_inum;
+    memset(ent->name, 0, DIRNAMELEN);
+    strncpy(ent->name, name, DIRNAMELEN);
+
+    if (inode_write_block(&dir_in, blk_idx, block_buf) == ERROR)
+        return ERROR;
+
+    dir_in.size += sizeof(struct dir_entry);
+    return save_inode(dir_inum, &dir_in);
+}
+
+// Free all data blocks (and the indirect block) owned by inode `in`.
+// Zeros out direct[] and indirect. Does NOT save the inode — caller must do that.
+static void inode_free_blocks(struct inode *in) {
+    if (in->size == 0) return;
+
+    int num_data_blocks = (in->size + BLOCKSIZE - 1) / BLOCKSIZE;
+
+    for (int d = 0; d < NUM_DIRECT && d < num_data_blocks; d++) {
+        if (in->direct[d] != 0) {
+            free_block_num(in->direct[d]);
+            in->direct[d] = 0;
+        }
+    }
+
+    if (num_data_blocks > NUM_DIRECT && in->indirect != 0) {
+        int *indirect_buf = read_block(in->indirect);
+        if (indirect_buf) {
+            int num_indirect = num_data_blocks - NUM_DIRECT;
+            for (int i = 0; i < num_indirect; i++) {
+                if (indirect_buf[i] != 0)
+                    free_block_num(indirect_buf[i]);
+            }
+            free(indirect_buf);
+        }
+        free_block_num(in->indirect);
+        in->indirect = 0;
+    }
+
+    in->size = 0;
+}
+
 
 
 // Full path lookup.
@@ -483,6 +701,8 @@ static void handle_stat(int pid, struct yfs_msg *msg);
 static void handle_open(int pid, struct yfs_msg *msg);
 static void handle_read(int pid, struct yfs_msg *msg);
 static void handle_getfsize(int pid, struct yfs_msg *msg);
+static void handle_create(int pid, struct yfs_msg *msg);
+static void handle_write(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -536,6 +756,12 @@ int main(int argc, char **argv) {
                 break;
             case YFS_REQ_OPEN:
                 handle_open(sender, &msg);
+                break;
+            case YFS_REQ_CREATE:
+                handle_create(sender, &msg);
+                break;
+            case YFS_REQ_WRITE:
+                handle_write(sender, &msg);
                 break;
             case YFS_REQ_STAT:
                 handle_stat(sender, &msg);
@@ -725,4 +951,160 @@ static void handle_shutdown(int pid, struct yfs_msg *msg) {
     Reply(msg, pid);
 
     Exit(0);
+}
+
+static void handle_create(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // trailing slash implies the caller expects a directory — error for Create
+    int plen = strlen(pathbuf);
+    if (plen > 0 && pathbuf[plen - 1] == '/') {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    char parent_path[MAXPATHNAMELEN];
+    char name[DIRNAMELEN + 1];
+    if (split_path(pathbuf, parent_path, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // resolve parent directory
+    int dir_inum = lookup_path(parent_path, msg->arg1, 0, 1);
+    if (dir_inum == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    struct inode dir_in;
+    if (load_inode(dir_inum, &dir_in) == ERROR || dir_in.type != INODE_DIRECTORY) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // check if name already exists in that directory
+    int existing = dir_lookup(dir_inum, name, strlen(name));
+    int file_inum;
+    struct inode file_in;
+
+    if (existing != ERROR) {
+        // file already exists
+        if (load_inode(existing, &file_in) == ERROR) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+        // cannot truncate a directory
+        if (file_in.type == INODE_DIRECTORY) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+        // truncate: free blocks, set size=0; reuse count does NOT change per spec
+        inode_free_blocks(&file_in);
+        if (save_inode(existing, &file_in) == ERROR) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+        file_inum = existing;
+
+    } else {
+        // allocate a fresh inode
+        file_inum = alloc_inode_num();
+        if (file_inum == ERROR) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+
+        memset(&file_in, 0, sizeof(file_in));
+        file_in.type  = INODE_REGULAR;
+        file_in.nlink = 1;
+        file_in.reuse = 1;   // first allocation — increment from 0
+        file_in.size  = 0;
+
+        if (save_inode(file_inum, &file_in) == ERROR) {
+            free_inode_num(file_inum);
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+
+        if (dir_add_entry(dir_inum, file_inum, name) == ERROR) {
+            // roll back inode allocation
+            file_in.type = INODE_FREE;
+            save_inode(file_inum, &file_in);
+            free_inode_num(file_inum);
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+    }
+
+    msg->arg1 = 0;
+    msg->arg2 = file_inum;
+    msg->arg3 = file_in.reuse;
+    Reply(msg, pid);
+}
+
+static void handle_write(int pid, struct yfs_msg *msg) {
+    int inum      = msg->arg1;
+    int reuse     = msg->arg2;
+    int offset    = msg->arg3;
+    int size      = (int)(long)msg->ptr2;
+    void *clibuf  = msg->ptr1;
+
+    // Load and verify inode
+    struct inode in;
+    if (load_inode(inum, &in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (in.reuse != reuse) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (in.type == INODE_DIRECTORY) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (size <= 0) {
+        msg->arg1 = 0; Reply(msg, pid); return;
+    }
+
+    // Clamp to maximum possible file size
+    int max_bytes = (NUM_DIRECT + BLOCKSIZE / (int)sizeof(int)) * BLOCKSIZE;
+    if (offset >= max_bytes) {
+        msg->arg1 = 0; Reply(msg, pid); return;
+    }
+    if (offset + size > max_bytes) size = max_bytes - offset;
+
+    // Pull the write data out of the client's address space
+    char *data = malloc(size);
+    if (!data) { msg->arg1 = ERROR; Reply(msg, pid); return; }
+    if (CopyFrom(pid, data, clibuf, size) == ERROR) {
+        free(data); msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    int bytes_written = 0;
+    char block_buf[BLOCKSIZE];
+
+    while (bytes_written < size) {
+        int cur_off  = offset + bytes_written;
+        int blk_idx  = cur_off / BLOCKSIZE;
+        int blk_off  = cur_off % BLOCKSIZE;            // byte offset within the block
+        int to_write = BLOCKSIZE - blk_off;            // space left in this block
+        if (to_write > size - bytes_written)
+            to_write = size - bytes_written;           // don't exceed requested size
+
+        // Partial write: must read the existing block first so we don't
+        // clobber the bytes we aren't touching (read-modify-write).
+        if (blk_off != 0 || to_write != BLOCKSIZE) {
+            if (inode_read_block(&in, blk_idx, block_buf) == ERROR) break;
+        }
+
+        memcpy(block_buf + blk_off, data + bytes_written, to_write);
+
+        if (inode_write_block(&in, blk_idx, block_buf) == ERROR) break;
+
+        bytes_written += to_write;
+    }
+
+    free(data);
+
+    // Extend the file's size if we wrote past the old EOF
+    if (offset + bytes_written > in.size)
+        in.size = offset + bytes_written;
+
+    if (save_inode(inum, &in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    msg->arg1 = bytes_written;
+    Reply(msg, pid);
 }

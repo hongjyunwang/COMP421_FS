@@ -136,6 +136,55 @@ int Close(int fd) {
     return 0;
 }
 
+int Create(char *pathname) {
+    struct yfs_msg msg;
+
+    msg.type = YFS_REQ_CREATE;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = curdir_reuse;
+    msg.arg3 = 0;
+    msg.ptr1 = pathname;
+    msg.ptr2 = NULL;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    if (msg.arg1 == ERROR) return ERROR;
+
+    int fd = alloc_fd();
+    if (fd == ERROR) return ERROR;
+
+    struct open_file *of = malloc(sizeof(*of));
+    if (!of) return ERROR;
+    of->inum   = msg.arg2;
+    of->reuse  = msg.arg3;
+    of->offset = 0;
+
+    open_table[fd] = of;
+    return fd;
+}
+
+int Write(int fd, void *buf, int size) {
+    if (fd < 0 || fd >= MAX_OPEN_FILES || open_table[fd] == NULL) return ERROR;
+    if (size < 0) return ERROR;
+    if (size == 0) return 0;
+
+    struct open_file *of = open_table[fd];
+
+    struct yfs_msg msg;
+    msg.type = YFS_REQ_WRITE;
+    msg.arg1 = of->inum; // which inode
+    msg.arg2 = of->reuse; // staleness check
+    msg.arg3 = of->offset; // where in the file to write
+    msg.ptr1 = buf; // client-side buffer address (sent as raw pointer value)
+    msg.ptr2 = (void *)(long)size;  // piggyback size in the pointer field
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    if (msg.arg1 == ERROR) return ERROR;
+
+    int written = msg.arg1;
+    of->offset += written;
+    return written;
+}
+
 int Seek(int fd, int offset, int whence){
 
     if(fd < 0 || fd >= MAX_OPEN_FILES){
