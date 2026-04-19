@@ -57,6 +57,31 @@ enum {
     YFS_REQ_GETFSIZE
 };
 
+int ChDir(char *pathname) {
+    struct yfs_msg msg;
+
+    msg.type = YFS_REQ_CHDIR;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = curdir_reuse;
+    msg.arg3 = 0;
+    msg.ptr1 = pathname;
+    msg.ptr2 = NULL;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) {
+        return ERROR;
+    }
+
+    if (msg.arg1 == ERROR) {
+        return ERROR;
+    }
+
+    // update current directory
+    curdir_inum = msg.arg1;
+    curdir_reuse = msg.arg2;
+
+    return 0;
+}
+
 int MkDir(char *pathname) {
     struct yfs_msg msg;
     msg.type = YFS_REQ_MKDIR;

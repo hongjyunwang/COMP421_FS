@@ -810,6 +810,7 @@ static void handle_create(int pid, struct yfs_msg *msg);
 static void handle_write(int pid, struct yfs_msg *msg);
 static void handle_mkdir(int pid, struct yfs_msg *msg);
 static void handle_rmdir(int pid, struct yfs_msg *msg);
+static void handle_chdir(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -858,6 +859,9 @@ int main(int argc, char **argv) {
         //Dispatcher
         switch (msg.type) {
             // TODO: add other cases
+            case YFS_REQ_CHDIR:
+                handle_chdir(sender, &msg);
+                break;
             case YFS_REQ_MKDIR:
                 handle_mkdir(sender, &msg);
                 break;
@@ -897,6 +901,43 @@ int main(int argc, char **argv) {
     }
 
     return 0; // never reached
+}
+
+static void handle_chdir(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    int target_inum = lookup_path(pathbuf, cwd_inum, 0, 1);
+    if (target_inum == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    struct inode in;
+    if (load_inode(target_inum, &in) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    if (in.type != INODE_DIRECTORY) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+
+    msg->arg1 = target_inum;
+    msg->arg2 = in.reuse;
+
+    Reply(msg, pid);
 }
 
 static void handle_mkdir(int pid, struct yfs_msg *msg) {
