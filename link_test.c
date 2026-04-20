@@ -112,22 +112,22 @@ static void test_shared_data(void) {
 // ================================================================
 // Test: unlinking original leaves link intact
 // ================================================================
-// static void test_unlink_original(void) {
-//     make_file("/unlink_orig.txt", "survive");
-//     Link("/unlink_orig.txt", "/unlink_link.txt");
+static void test_unlink_original(void) {
+    make_file("/unlink_orig.txt", "survive");
+    Link("/unlink_orig.txt", "/unlink_link.txt");
 
-//     Unlink("/unlink_orig.txt");
+    Unlink("/unlink_orig.txt");
 
-//     // Link should still be openable and readable
-//     char buf[64];
-//     int n = read_file("/unlink_link.txt", buf, sizeof(buf));
-//     EXPECT(n > 0 && strcmp(buf, "survive") == 0, "link survives after original unlinked");
+    // Link should still be openable and readable
+    char buf[64];
+    int n = read_file("/unlink_link.txt", buf, sizeof(buf));
+    EXPECT(n > 0 && strcmp(buf, "survive") == 0, "link survives after original unlinked");
 
-//     // nlink should now be 1
-//     struct Stat st;
-//     Stat("/unlink_link.txt", &st);
-//     EXPECT(st.nlink == 1, "nlink is 1 after original unlinked");
-// }
+    // nlink should now be 1
+    struct Stat st;
+    Stat("/unlink_link.txt", &st);
+    EXPECT(st.nlink == 1, "nlink is 1 after original unlinked");
+}
 
 // ================================================================
 // Test: link into a different directory
@@ -225,7 +225,7 @@ int main(void) {
     test_nlink_increments();
     test_same_inode();
     test_shared_data();
-    // test_unlink_original();   <-- remove this line
+    test_unlink_original();
     test_cross_directory_link();
     test_multiple_links();
     test_error_nonexistent_source();

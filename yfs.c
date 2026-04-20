@@ -812,6 +812,7 @@ static void handle_mkdir(int pid, struct yfs_msg *msg);
 static void handle_rmdir(int pid, struct yfs_msg *msg);
 static void handle_chdir(int pid, struct yfs_msg *msg);
 static void handle_link(int pid, struct yfs_msg *msg);
+static void handle_unlink(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -895,6 +896,9 @@ int main(int argc, char **argv) {
                 break;
             case YFS_REQ_LINK:
                 handle_link(sender, &msg);
+                break;
+            case YFS_REQ_UNLINK:
+                handle_unlink(sender, &msg);
                 break;
             default:
                 TracePrintf(0, "yfs: Unknown request %d\n", msg.type);
@@ -1529,5 +1533,76 @@ static void handle_link(int pid, struct yfs_msg *msg) {
     }
 
     msg->arg1 = 0; // success
+    Reply(msg, pid);
+}
+
+static void handle_unlink(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    // Resolve parent dir and final component name
+    int parent_inum;
+    char name[DIRNAMELEN + 1];
+    if (lookup_parent(pathbuf, cwd_inum, &parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Reject "." and ".." explicitly
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Find the target inode number in the parent directory
+    int target_inum = dir_lookup(parent_inum, name, strlen(name));
+    if (target_inum == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Load target inode and verify it is not a directory
+    // The spec explicitly forbids Unlink on directories — use RmDir for that.
+    struct inode target_in;
+    if (load_inode(target_inum, &target_in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (target_in.type == INODE_DIRECTORY) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Remove the directory entry from the parent 
+    // This zeroes out the inum field of the matching dir_entry, making that
+    // slot available for reuse. It does NOT touch the inode itself yet.
+    if (dir_remove_entry(parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Decrement nlink
+    target_in.nlink--;
+
+    if (target_in.nlink == 0) {
+        //  Last link gone — free everything
+        inode_free_blocks(&target_in);
+        target_in.type = INODE_FREE;
+
+        if (save_inode(target_inum, &target_in) == ERROR) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+
+        // Return the inode number to the free inode list so it can be
+        // allocated again for a future Create or MkDir.
+        free_inode_num(target_inum);
+
+    } else {
+        // Other links still exist
+        if (save_inode(target_inum, &target_in) == ERROR) {
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+    }
+
+    msg->arg1 = 0;
     Reply(msg, pid);
 }

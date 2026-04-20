@@ -345,3 +345,18 @@ int Link(char *oldname, char *newname) {
 
     return msg.arg1;
 }
+
+int Unlink(char *pathname) {
+    if (pathname == NULL || strlen(pathname) == 0) return ERROR;
+
+    struct yfs_msg msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.type = YFS_REQ_UNLINK;
+    msg.arg1 = curdir_inum;
+    msg.ptr1 = pathname;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+
+    return msg.arg1;
+}
