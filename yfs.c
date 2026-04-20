@@ -813,7 +813,8 @@ static void handle_rmdir(int pid, struct yfs_msg *msg);
 static void handle_chdir(int pid, struct yfs_msg *msg);
 static void handle_link(int pid, struct yfs_msg *msg);
 static void handle_unlink(int pid, struct yfs_msg *msg);
-
+static void handle_symlink(int pid, struct yfs_msg *msg);
+static void handle_readlink(int pid, struct yfs_msg *msg);
 //TODO: add other handlers
 
 
@@ -899,6 +900,12 @@ int main(int argc, char **argv) {
                 break;
             case YFS_REQ_UNLINK:
                 handle_unlink(sender, &msg);
+                break;
+            case YFS_REQ_SYMLINK:
+                handle_symlink(sender, &msg);
+                break;
+            case YFS_REQ_READLINK:
+                handle_readlink(sender, &msg);
                 break;
             default:
                 TracePrintf(0, "yfs: Unknown request %d\n", msg.type);
@@ -1212,7 +1219,7 @@ static void handle_open(int pid, struct yfs_msg *msg) {
 
     int inum;
 
-    if ((inum = lookup_path(pathbuf, msg->arg1, 0, 0)) == ERROR) {
+    if ((inum = lookup_path(pathbuf, msg->arg1, 0, 1)) == ERROR) {
         msg->arg1 = ERROR;
         Reply(msg, pid);
         return;
@@ -1604,5 +1611,163 @@ static void handle_unlink(int pid, struct yfs_msg *msg) {
     }
 
     msg->arg1 = 0;
+    Reply(msg, pid);
+}
+
+static void handle_symlink(int pid, struct yfs_msg *msg) {
+    char oldbuf[MAXPATHNAMELEN];
+    char newbuf[MAXPATHNAMELEN];
+
+    // ptr1 = oldname (the target), ptr2 = newname (the symlink to create)
+    if (CopyFrom(pid, oldbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (CopyFrom(pid, newbuf, msg->ptr2, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    //  Validate the target string
+    int targetlen = strlen(oldbuf);
+    if (targetlen == 0) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Resolve newname's parent and extract the final component
+    int parent_inum;
+    char name[DIRNAMELEN + 1];
+    if (lookup_parent(newbuf, cwd_inum, &parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Verify newname does not already exist
+    if (dir_lookup(parent_inum, name, strlen(name)) != ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Allocate a fresh inode for the symlink 
+    int new_inum = alloc_inode_num();
+    if (new_inum == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Write the target string into the symlink's data blocks
+    struct inode sym_in;
+    memset(&sym_in, 0, sizeof(sym_in));
+    sym_in.type  = INODE_SYMLINK;
+    sym_in.nlink = 1;
+    sym_in.reuse = 1;
+    sym_in.size  = 0;
+
+    // Write the target string block by block. Since MAXPATHNAMELEN < BLOCKSIZE
+    int bytes_written = 0;
+    char block_buf[BLOCKSIZE];
+
+    while (bytes_written < targetlen) {
+        int blk_idx = bytes_written / BLOCKSIZE;
+        int blk_off = bytes_written % BLOCKSIZE;
+        int to_copy = BLOCKSIZE - blk_off;
+        if (to_copy > targetlen - bytes_written)
+            to_copy = targetlen - bytes_written;
+
+        // Read-modify-write for partial blocks (only matters if string
+        // somehow spans multiple blocks, which MAXPATHNAMELEN makes unlikely)
+        if (blk_off != 0) {
+            if (inode_read_block(&sym_in, blk_idx, block_buf) == ERROR) {
+                free_inode_num(new_inum);
+                msg->arg1 = ERROR; Reply(msg, pid); return;
+            }
+        } else {
+            memset(block_buf, 0, BLOCKSIZE);
+        }
+
+        memcpy(block_buf + blk_off, oldbuf + bytes_written, to_copy);
+
+        if (inode_write_block(&sym_in, blk_idx, block_buf) == ERROR) {
+            free_inode_num(new_inum);
+            msg->arg1 = ERROR; Reply(msg, pid); return;
+        }
+
+        bytes_written += to_copy;
+    }
+
+    sym_in.size = targetlen;
+
+    // Save the symlink inode
+    if (save_inode(new_inum, &sym_in) == ERROR) {
+        inode_free_blocks(&sym_in);
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Add the directory entry for newname
+    if (dir_add_entry(parent_inum, new_inum, name) == ERROR) {
+        inode_free_blocks(&sym_in);
+        sym_in.type = INODE_FREE;
+        save_inode(new_inum, &sym_in);
+        free_inode_num(new_inum);
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    msg->arg1 = 0;
+    Reply(msg, pid);
+}
+
+static void handle_readlink(int pid, struct yfs_msg *msg) {
+    char pathbuf[MAXPATHNAMELEN];
+
+    // ptr1 = pathname of the symlink, ptr2 = client buf to write target into
+    // arg2 = len (max bytes to copy back)
+    if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    int cwd_inum = msg->arg1;
+    int len      = msg->arg2;
+
+    if (len <= 0) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Resolve the pathname with follow_last=0 
+    int sym_inum = lookup_path(pathbuf, cwd_inum, 0, 0);
+    if (sym_inum == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Verify the inode is actually a symlink
+    struct inode sym_in;
+    if (load_inode(sym_inum, &sym_in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (sym_in.type != INODE_SYMLINK) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Read the target string from the symlink's data blocks
+    int targetlen = sym_in.size;
+    int to_return = (targetlen < len) ? targetlen : len;  // min(targetlen, len)
+
+    char *tmpbuf = malloc(to_return);
+    if (!tmpbuf) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    if (inode_read_bytes(&sym_in, 0, tmpbuf, to_return) == ERROR) {
+        free(tmpbuf);
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Copy the result back into the client's buffer 
+    if (CopyTo(pid, msg->ptr2, tmpbuf, to_return) == ERROR) {
+        free(tmpbuf);
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    free(tmpbuf);
+
+    // Return value is the number of characters placed in buf (capped at len)
+    msg->arg1 = to_return;
     Reply(msg, pid);
 }

@@ -360,3 +360,39 @@ int Unlink(char *pathname) {
 
     return msg.arg1;
 }
+
+int SymLink(char *oldname, char *newname) {
+    if (oldname == NULL || newname == NULL) return ERROR;
+    if (strlen(oldname) == 0 || strlen(newname) == 0) return ERROR;
+
+    struct yfs_msg msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.type = YFS_REQ_SYMLINK;
+    msg.arg1 = curdir_inum;
+    msg.ptr1 = oldname;   // target (what the symlink points to)
+    msg.ptr2 = newname;   // the symlink name to create
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+    return msg.arg1;
+}
+
+int ReadLink(char *pathname, char *buf, int len) {
+    if (pathname == NULL || buf == NULL || len <= 0) return ERROR;
+    if (strlen(pathname) == 0) return ERROR;
+
+    struct yfs_msg msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.type = YFS_REQ_READLINK;
+    msg.arg1 = curdir_inum;
+    msg.arg2 = len;
+    msg.ptr1 = pathname;   // which symlink to read
+    msg.ptr2 = buf;        // client buffer to write the target into
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
+
+    // arg1 is ERROR or the number of bytes written into buf
+    if (msg.arg1 == ERROR) return ERROR;
+    return msg.arg1;
+}
