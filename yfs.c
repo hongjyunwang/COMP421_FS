@@ -811,6 +811,7 @@ static void handle_write(int pid, struct yfs_msg *msg);
 static void handle_mkdir(int pid, struct yfs_msg *msg);
 static void handle_rmdir(int pid, struct yfs_msg *msg);
 static void handle_chdir(int pid, struct yfs_msg *msg);
+static void handle_link(int pid, struct yfs_msg *msg);
 
 //TODO: add other handlers
 
@@ -891,6 +892,9 @@ int main(int argc, char **argv) {
                 break;
             case YFS_REQ_SHUTDOWN:
                 handle_shutdown(sender, &msg);
+                break;
+            case YFS_REQ_LINK:
+                handle_link(sender, &msg);
                 break;
             default:
                 TracePrintf(0, "yfs: Unknown request %d\n", msg.type);
@@ -1455,5 +1459,75 @@ static void handle_write(int pid, struct yfs_msg *msg) {
     }
 
     msg->arg1 = bytes_written;
+    Reply(msg, pid);
+}
+
+static void handle_link(int pid, struct yfs_msg *msg) {
+    char oldbuf[MAXPATHNAMELEN];
+    char newbuf[MAXPATHNAMELEN];
+
+    // Pull both pathnames out of the client's address space
+    // ptr1 = oldname, ptr2 = newname, arg1 = cwd_inum (set by iolib)
+    if (CopyFrom(pid, oldbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (CopyFrom(pid, newbuf, msg->ptr2, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    int cwd_inum = msg->arg1;
+
+    // Resolve oldname -> must exist, symlinks followed
+    int old_inum = lookup_path(oldbuf, cwd_inum, 0, 1);
+    if (old_inum == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Verify oldname is not a directory
+    struct inode old_in;
+    if (load_inode(old_inum, &old_in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    if (old_in.type == INODE_DIRECTORY) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Resolve newname's parent directory + extract the final name 
+    // lookup_parent splits "a/b/c" into parent="a/b" and name="c",
+    // then calls lookup_path on the parent (follow_last=1).
+    // also verifies the parent is actually a directory.
+    int parent_inum;
+    char name[DIRNAMELEN + 1];
+    if (lookup_parent(newbuf, cwd_inum, &parent_inum, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Verify newname does not already exist in that directory 
+    // dir_lookup returns ERROR when the name is absent, which is what we want.
+    if (dir_lookup(parent_inum, name, strlen(name)) != ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Insert the new directory entry pointing at old_inum
+    // dir_add_entry reuses a free slot (inum==0) if one exists, otherwise
+    // appends and grows the directory's size field.
+    if (dir_add_entry(parent_inum, old_inum, name) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    // Increment nlink on the inode and persist it
+    // nlink counts every directory entry across the whole filesystem that
+    // contains this inode number — we just added one, so bump it.
+    // We reload old_in here in case dir_add_entry modified the same inode
+    // block on disk (unlikely for a regular file, but defensively correct).
+    if (load_inode(old_inum, &old_in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+    old_in.nlink++;
+    if (save_inode(old_inum, &old_in) == ERROR) {
+        msg->arg1 = ERROR; Reply(msg, pid); return;
+    }
+
+    msg->arg1 = 0; // success
     Reply(msg, pid);
 }

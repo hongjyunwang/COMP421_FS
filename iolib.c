@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <comp421/filesystem.h>
 #include <stdlib.h>
+#include <string.h>
 
 //need to update every call
 static int curdir_inum = ROOTINODE;
@@ -324,6 +325,23 @@ int Shutdown(void) {
     if (Send(&msg, -FILE_SERVER) == ERROR) {
         return ERROR;
     }
+
+    return msg.arg1;
+}
+
+int Link(char *oldname, char *newname) {
+    if (oldname == NULL || newname == NULL) return ERROR;
+    if (strlen(oldname) == 0 || strlen(newname) == 0) return ERROR;
+
+    struct yfs_msg msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.type = YFS_REQ_LINK;
+    msg.arg1 = curdir_inum;   // <-- was current_cwd_inum
+    msg.ptr1 = oldname;
+    msg.ptr2 = newname;
+
+    if (Send(&msg, -FILE_SERVER) == ERROR) return ERROR;
 
     return msg.arg1;
 }
