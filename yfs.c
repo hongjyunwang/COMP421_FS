@@ -37,6 +37,201 @@ enum {
     YFS_REQ_GETFSIZE
 };
 
+// ======================== Cache =========================
+//temp
+//#define BLOCK_CACHESIZE_1 3   
+typedef struct cache_block {
+    int valid;
+    int dirty;
+    int blockno;
+
+    char data[BLOCKSIZE];
+
+    //chain
+    struct cache_block *hash_next;
+
+    //LRU doubly linked list
+    struct cache_block *lru_prev;
+    struct cache_block *lru_next;
+} cache_block_t;
+
+//fixed size cache
+static cache_block_t block_cache[BLOCK_CACHESIZE];
+
+//bucket heads
+#define BLOCK_HASH_SIZE 64   //should be enough
+static cache_block_t *block_hash[BLOCK_HASH_SIZE];
+
+//LRU ptrs
+static cache_block_t *lru_head = NULL;   /* most recently used */
+static cache_block_t *lru_tail = NULL;   /* least recently used */
+
+//simple hash func
+static int block_hash_fn(int blockno) {
+    return blockno % BLOCK_HASH_SIZE;
+}
+
+//LRU helpers, ins and rm
+static void lru_remove(cache_block_t *cb) {
+    if (cb->lru_prev) cb->lru_prev->lru_next = cb->lru_next;
+    else lru_head = cb->lru_next;
+
+    if (cb->lru_next) cb->lru_next->lru_prev = cb->lru_prev;
+    else lru_tail = cb->lru_prev;
+
+    cb->lru_prev = NULL;
+    cb->lru_next = NULL;
+}
+
+static void lru_insert_head(cache_block_t *cb) {
+    cb->lru_prev = NULL;
+    cb->lru_next = lru_head;
+
+    if (lru_head) lru_head->lru_prev = cb;
+    else lru_tail = cb;
+
+    lru_head = cb;
+}
+
+//mark recently used
+static void lru_touch(cache_block_t *cb) {
+    if (lru_head == cb) return;
+    lru_remove(cb);
+    lru_insert_head(cb);
+}
+//hastable helpers
+static void hash_insert(cache_block_t *cb) {
+    int h = block_hash_fn(cb->blockno);
+    cb->hash_next = block_hash[h];
+    block_hash[h] = cb;
+}
+
+static void hash_remove(cache_block_t *cb) {
+    int h = block_hash_fn(cb->blockno);
+    cache_block_t **pp = &block_hash[h];
+
+    while (*pp) {
+        if (*pp == cb) {
+            *pp = cb->hash_next;
+            cb->hash_next = NULL;
+            return;
+        }
+        pp = &((*pp)->hash_next);
+    }
+}
+
+static cache_block_t *hash_find(int blockno) {
+    int h = block_hash_fn(blockno);
+    cache_block_t *cur = block_hash[h];
+
+    while (cur) {
+        if (cur->valid && cur->blockno == blockno) {
+            return cur;
+        }
+        cur = cur->hash_next;
+    }
+    return NULL;
+}
+
+//cache init
+static void block_cache_init(void) {
+    memset(block_cache, 0, sizeof(block_cache));
+    memset(block_hash, 0, sizeof(block_hash));
+    lru_head = NULL;
+    lru_tail = NULL;
+
+    for (int i = 0; i < BLOCK_CACHESIZE; i++) {
+        lru_insert_head(&block_cache[i]);
+    }
+}
+
+//flush
+static int block_cache_flush_entry(cache_block_t *cb) {
+    if (!cb->valid || !cb->dirty) return 0;
+
+    if (cb->valid && cb->dirty) {
+    TracePrintf(1, "FLUSH block %d\n", cb->blockno);
+    }
+
+    if (WriteSector(cb->blockno, cb->data) == ERROR) {
+        return ERROR;
+    }
+
+    cb->dirty = 0;
+    return 0;
+}
+
+//cached get block
+static cache_block_t *block_cache_get(int blockno) {
+    cache_block_t *cb = hash_find(blockno);
+    if (cb) {
+        TracePrintf(1, "CACHE HIT block %d\n", blockno);
+        lru_touch(cb);             //hit
+        return cb;
+    }
+
+    //miss, evict tail
+    TracePrintf(1, "CACHE MISS block %d\n", blockno);
+    cb = lru_tail;
+    if (cb == NULL) return NULL;
+
+    //remove old mapping if valid 
+    if (cb->valid) {
+        TracePrintf(1, "EVICT block %d dirty=%d\n", cb->blockno, cb->dirty);
+        if (block_cache_flush_entry(cb) == ERROR) {
+            return NULL;
+        }
+        hash_remove(cb);
+    }
+
+    //load requested block
+    if (ReadSector(blockno, cb->data) == ERROR) {
+        return NULL;
+    }
+    TracePrintf(1, "LOAD block %d into cache\n", blockno);
+
+    cb->valid = 1;
+    cb->dirty = 0;
+    cb->blockno = blockno;
+    cb->hash_next = NULL;
+
+    hash_insert(cb);
+    lru_touch(cb);
+
+    return cb;
+}
+
+//Read and Write wrappers 
+static int cache_read_block(int blockno, void *buf) {
+    cache_block_t *cb = block_cache_get(blockno);
+    if (cb == NULL) return ERROR;
+
+    memcpy(buf, cb->data, BLOCKSIZE);
+    return 0;
+}
+
+static int cache_write_block(int blockno, const void *buf) {
+    cache_block_t *cb = block_cache_get(blockno);
+    if (cb == NULL) return ERROR;
+
+    memcpy(cb->data, buf, BLOCKSIZE);
+    cb->dirty = 1;
+    TracePrintf(1, "CACHE WRITE block %d (mark dirty)\n", blockno);
+    lru_touch(cb);
+    return 0;
+}
+
+//flush all for Sync and Shutdown
+static int block_cache_flush_all(void) {
+    TracePrintf(1, "FLUSH ALL CACHE\n");
+    for (int i = 0; i < BLOCK_CACHESIZE; i++) {
+        if (block_cache_flush_entry(&block_cache[i]) == ERROR) {
+            return ERROR;
+        }
+    }
+    return 0;
+}
+
 // ======================== Free List Nodes and Operations =========================
 typedef struct free_node {
     int num; // inode number for inode list, block number for data list
@@ -87,7 +282,7 @@ static void *read_block(int blockno) {
         TracePrintf(0, "fs_init: malloc failed reading block %d\n", blockno);
         Exit(ERROR);
     }
-    if (ReadSector(blockno, buf) == ERROR) {
+    if (cache_read_block(blockno, buf) == ERROR) {
         TracePrintf(0, "fs_init: ReadSector(%d) failed\n", blockno);
         Exit(ERROR);
     }
@@ -159,7 +354,7 @@ static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
         return 0;
     }
 
-    return ReadSector(blkno, buf);
+    return cache_read_block(blkno, buf);;
 }
 
 static int inode_read_bytes(struct inode *in, int offset, char *dst, int len) {
@@ -242,7 +437,7 @@ static int save_inode(int inum, struct inode *in) {
     struct inode *inode_array = (struct inode *)iblock_buf;
     inode_array[islot] = *in;
 
-    if (WriteSector(iblock, iblock_buf) == ERROR) {
+    if (cache_write_block(iblock, iblock_buf) == ERROR) {
         free(iblock_buf);
         return ERROR;
     }
@@ -269,7 +464,7 @@ static int inode_write_block(struct inode *in, int blk_idx, void *buf) {
         } else {
             blkno = in->direct[blk_idx];
         }
-        return WriteSector(blkno, buf);
+        return cache_write_block(blkno, buf);
 
     } else {
         // Indirect block path
@@ -298,12 +493,12 @@ static int inode_write_block(struct inode *in, int blk_idx, void *buf) {
         }
 
         // Write the data block first
-        if (WriteSector(blkno, buf) == ERROR) {
+        if (cache_write_block(blkno, buf) == ERROR) {
             free(indirect_buf); return ERROR;
         }
 
         // Write the (possibly updated) indirect block back
-        if (WriteSector(in->indirect, indirect_buf) == ERROR) {
+        if (cache_write_block(in->indirect, indirect_buf) == ERROR) {
             free(indirect_buf); return ERROR;
         }
 
@@ -828,6 +1023,11 @@ int main(int argc, char **argv) {
 
     TracePrintf(1, "yfs: Registered as FILE_SERVER\n");
 
+    //init cache
+    block_cache_init();
+
+    TracePrintf(1, "fs_init: initialized block cache\n");
+
     fs_init();
 
 
@@ -1303,6 +1503,8 @@ static void handle_sync(int pid, struct yfs_msg *msg) {
     msg->arg1 = 0;
     //TODO: write all dirty cached inodes back to their corresponding disk blocks (in the cache) and
     //then writes all dirty cached disk blocks to the disk.
+    block_cache_flush_all();
+
     Reply(msg, pid);
 }
 
@@ -1310,6 +1512,7 @@ static void handle_shutdown(int pid, struct yfs_msg *msg) {
     TracePrintf(0, "yfs: shutting down\n");
 
     //do cache stuff sync/flush 
+    block_cache_flush_all();
 
     msg->arg1 = 0;   // Shutdown always returns 0
     Reply(msg, pid);
