@@ -232,6 +232,186 @@ static int block_cache_flush_all(void) {
     return 0;
 }
 
+// ======================== Inode Cache =========================
+
+typedef struct cache_inode {
+    int valid;
+    int dirty;
+    int inum;
+    struct inode data;
+
+    // hash chain
+    struct cache_inode *hash_next;
+
+    // LRU doubly linked list
+    struct cache_inode *lru_prev;
+    struct cache_inode *lru_next;
+} cache_inode_t;
+
+static cache_inode_t inode_cache[INODE_CACHESIZE];
+
+#define INODE_HASH_SIZE 64
+static cache_inode_t *inode_hash[INODE_HASH_SIZE];
+
+static cache_inode_t *inode_lru_head = NULL;  /* most recently used */
+static cache_inode_t *inode_lru_tail = NULL;  /* least recently used */
+
+static int inode_hash_fn(int inum) {
+    return inum % INODE_HASH_SIZE;
+}
+
+// LRU helpers
+static void inode_lru_remove(cache_inode_t *ci) {
+    if (ci->lru_prev) ci->lru_prev->lru_next = ci->lru_next;
+    else inode_lru_head = ci->lru_next;
+
+    if (ci->lru_next) ci->lru_next->lru_prev = ci->lru_prev;
+    else inode_lru_tail = ci->lru_prev;
+
+    ci->lru_prev = NULL;
+    ci->lru_next = NULL;
+}
+
+static void inode_lru_insert_head(cache_inode_t *ci) {
+    ci->lru_prev = NULL;
+    ci->lru_next = inode_lru_head;
+
+    if (inode_lru_head) inode_lru_head->lru_prev = ci;
+    else inode_lru_tail = ci;
+
+    inode_lru_head = ci;
+}
+
+static void inode_lru_touch(cache_inode_t *ci) {
+    if (inode_lru_head == ci) return;
+    inode_lru_remove(ci);
+    inode_lru_insert_head(ci);
+}
+
+// Hash helpers
+static void inode_hash_insert(cache_inode_t *ci) {
+    int h = inode_hash_fn(ci->inum);
+    ci->hash_next = inode_hash[h];
+    inode_hash[h] = ci;
+}
+
+static void inode_hash_remove(cache_inode_t *ci) {
+    int h = inode_hash_fn(ci->inum);
+    cache_inode_t **pp = &inode_hash[h];
+    while (*pp) {
+        if (*pp == ci) {
+            *pp = ci->hash_next;
+            ci->hash_next = NULL;
+            return;
+        }
+        pp = &((*pp)->hash_next);
+    }
+}
+
+static cache_inode_t *inode_hash_find(int inum) {
+    int h = inode_hash_fn(inum);
+    cache_inode_t *cur = inode_hash[h];
+    while (cur) {
+        if (cur->valid && cur->inum == inum) return cur;
+        cur = cur->hash_next;
+    }
+    return NULL;
+}
+
+//  Flush one inode cache entry back into the block cache
+// This does NOT call WriteSector. It writes the inode into whichever block
+// cache entry holds its inode block, and marks that block dirty. The block
+// cache then flushes it to disk on its own eviction or on Sync/Shutdown.
+static int inode_cache_flush_entry(cache_inode_t *ci) {
+    if (!ci->valid || !ci->dirty) return 0;
+
+    TracePrintf(1, "INODE FLUSH inum=%d\n", ci->inum);
+
+    int inodes_per_block = BLOCKSIZE / INODESIZE;
+    int iblock = 1 + (ci->inum / inodes_per_block);
+    int islot  = ci->inum % inodes_per_block;
+
+    // Pull the inode block out of the block cache (or disk if not cached)
+    char block_buf[BLOCKSIZE];
+    if (cache_read_block(iblock, block_buf) == ERROR) return ERROR;
+
+    // Overwrite just this inode's slot
+    struct inode *inode_array = (struct inode *)block_buf;
+    inode_array[islot] = ci->data;
+
+    // Write back into the block cache (marks the block dirty)
+    if (cache_write_block(iblock, block_buf) == ERROR) return ERROR;
+
+    ci->dirty = 0;
+    return 0;
+}
+
+// Initialize
+static void inode_cache_init(void) {
+    memset(inode_cache, 0, sizeof(inode_cache));
+    memset(inode_hash,  0, sizeof(inode_hash));
+    inode_lru_head = NULL;
+    inode_lru_tail = NULL;
+
+    for (int i = 0; i < INODE_CACHESIZE; i++) {
+        inode_lru_insert_head(&inode_cache[i]);
+    }
+}
+
+// Get an inode cache entry for inum, loading from block cache if needed
+static cache_inode_t *inode_cache_get(int inum) {
+    cache_inode_t *ci = inode_hash_find(inum);
+    if (ci) {
+        TracePrintf(1, "INODE CACHE HIT inum=%d\n", inum);
+        inode_lru_touch(ci);
+        return ci;
+    }
+
+    TracePrintf(1, "INODE CACHE MISS inum=%d\n", inum);
+
+    // Evict the LRU tail
+    ci = inode_lru_tail;
+    if (ci == NULL) return NULL;
+
+    if (ci->valid) {
+        TracePrintf(1, "INODE EVICT inum=%d dirty=%d\n", ci->inum, ci->dirty);
+        if (inode_cache_flush_entry(ci) == ERROR) return NULL;
+        inode_hash_remove(ci);
+    }
+
+    // Load the requested inode from the block cache
+    int inodes_per_block = BLOCKSIZE / INODESIZE;
+    int iblock = 1 + (inum / inodes_per_block);
+    int islot  = inum % inodes_per_block;
+
+    char block_buf[BLOCKSIZE];
+    if (cache_read_block(iblock, block_buf) == ERROR) return NULL;
+
+    struct inode *inode_array = (struct inode *)block_buf;
+
+    ci->valid = 1;
+    ci->dirty = 0;
+    ci->inum = inum;
+    ci->data = inode_array[islot];
+    ci->hash_next = NULL;
+
+    inode_hash_insert(ci);
+    inode_lru_touch(ci);
+
+    TracePrintf(1, "INODE LOAD inum=%d into cache\n", inum);
+    return ci;
+}
+
+// Flush all dirty inode cache entries into the block cache
+static int inode_cache_flush_all(void) {
+    TracePrintf(1, "INODE FLUSH ALL\n");
+    for (int i = 0; i < INODE_CACHESIZE; i++) {
+        if (inode_cache_flush_entry(&inode_cache[i]) == ERROR) return ERROR;
+    }
+    return 0;
+}
+
+
 // ======================== Free List Nodes and Operations =========================
 typedef struct free_node {
     int num; // inode number for inode list, block number for data list
@@ -271,7 +451,9 @@ int pop_free(free_node_t **list) {
 
 int alloc_inode_num(void) { return pop_free(&free_inode_list); }
 int alloc_block_num(void) { return pop_free(&free_block_list); }
-void free_inode_num(int inum) { push_free(&free_inode_list, inum); }
+void free_inode_num(int inum) { 
+    push_free(&free_inode_list, inum);
+}
 void free_block_num(int blkno) { push_free(&free_block_list, blkno); }
 
 
@@ -354,7 +536,7 @@ static int inode_read_block(struct inode *in, int blk_idx, void *buf) {
         return 0;
     }
 
-    return cache_read_block(blkno, buf);;
+    return cache_read_block(blkno, buf);
 }
 
 static int inode_read_bytes(struct inode *in, int offset, char *dst, int len) {
@@ -400,48 +582,27 @@ static int inode_read_bytes(struct inode *in, int offset, char *dst, int len) {
 }
 
 int load_inode(int inum, struct inode *out) {
-    if (out == NULL) {
-        return ERROR;
-    }
+    if (out == NULL) return ERROR;
+    if (inum < 1 || inum > num_inodes_total) return ERROR;
 
-    if (inum < 1 || inum > num_inodes_total) {
-        return ERROR;
-    }
+    cache_inode_t *ci = inode_cache_get(inum);
+    if (ci == NULL) return ERROR;
 
-    int inodes_per_block = BLOCKSIZE / INODESIZE;
-
-    int iblock = 1 + (inum / inodes_per_block);
-    int islot  = inum % inodes_per_block;
-
-    void *iblock_buf = read_block(iblock);
-    if (iblock_buf == NULL) {
-        return ERROR;
-    }
-
-    struct inode *inode_array = (struct inode *)iblock_buf;
-    *out = inode_array[islot];
-
-    free(iblock_buf);
+    *out = ci->data;
     return 0;
 }
 
-// Save a modified inode back to its disk block.
 static int save_inode(int inum, struct inode *in) {
-    int inodes_per_block = BLOCKSIZE / INODESIZE;
-    int iblock = 1 + (inum / inodes_per_block);
-    int islot  = inum % inodes_per_block;
+    if (in == NULL) return ERROR;
+    if (inum < 1 || inum > num_inodes_total) return ERROR;
 
-    void *iblock_buf = read_block(iblock);
-    if (!iblock_buf) return ERROR;
+    cache_inode_t *ci = inode_cache_get(inum);
+    if (ci == NULL) return ERROR;
 
-    struct inode *inode_array = (struct inode *)iblock_buf;
-    inode_array[islot] = *in;
-
-    if (cache_write_block(iblock, iblock_buf) == ERROR) {
-        free(iblock_buf);
-        return ERROR;
-    }
-    free(iblock_buf);
+    ci->data  = *in;
+    ci->dirty = 1;
+    TracePrintf(1, "INODE CACHE WRITE inum=%d (mark dirty)\n", inum);
+    inode_lru_touch(ci);
     return 0;
 }
 
@@ -1025,7 +1186,8 @@ int main(int argc, char **argv) {
 
     //init cache
     block_cache_init();
-
+    inode_cache_init();
+    
     TracePrintf(1, "fs_init: initialized block cache\n");
 
     fs_init();
@@ -1195,11 +1357,15 @@ static void handle_mkdir(int pid, struct yfs_msg *msg) {
         return;
     }
 
+    struct inode old_in;
+    int old_reuse = 0;
+    if (load_inode(new_inum, &old_in) == 0) old_reuse = old_in.reuse;
+
     struct inode new_dir;
     memset(&new_dir, 0, sizeof(new_dir));
     new_dir.type = INODE_DIRECTORY;
     new_dir.nlink = 2;
-    new_dir.reuse = 1;   // or increment from prior value if you track old reuse
+    new_dir.reuse = old_reuse + 1;;   // or increment from prior value if you track old reuse
     new_dir.size = 2 * sizeof(struct dir_entry);
     new_dir.direct[0] = new_blk;
 
@@ -1214,7 +1380,7 @@ static void handle_mkdir(int pid, struct yfs_msg *msg) {
     ents[1].name[0] = '.';
     ents[1].name[1] = '.';
 
-    if (WriteSector(new_blk, block_buf) == ERROR) {
+    if (cache_write_block(new_blk, block_buf) == ERROR) {
         free_block_num(new_blk);
         free_inode_num(new_inum);
         msg->arg1 = ERROR;
@@ -1344,6 +1510,12 @@ static void handle_rmdir(int pid, struct yfs_msg *msg) {
         return;
     }
 
+    cache_inode_t *ci = inode_hash_find(target_inum);
+    if (ci) {
+        inode_hash_remove(ci);
+        ci->valid = 0;
+        ci->dirty = 0;
+    }
     free_inode_num(target_inum);
 
     msg->arg1 = 0;
@@ -1500,11 +1672,10 @@ static void handle_getfsize(int pid, struct yfs_msg *msg){
 }
 
 static void handle_sync(int pid, struct yfs_msg *msg) {
-    msg->arg1 = 0;
     //TODO: write all dirty cached inodes back to their corresponding disk blocks (in the cache) and
-    //then writes all dirty cached disk blocks to the disk.
-    block_cache_flush_all();
-
+    inode_cache_flush_all();   // inodes first → writes into block cache
+    block_cache_flush_all();   // then flush blocks to disk
+    msg->arg1 = 0;
     Reply(msg, pid);
 }
 
@@ -1512,6 +1683,7 @@ static void handle_shutdown(int pid, struct yfs_msg *msg) {
     TracePrintf(0, "yfs: shutting down\n");
 
     //do cache stuff sync/flush 
+    inode_cache_flush_all(); 
     block_cache_flush_all();
 
     msg->arg1 = 0;   // Shutdown always returns 0
@@ -1576,10 +1748,14 @@ static void handle_create(int pid, struct yfs_msg *msg) {
             msg->arg1 = ERROR; Reply(msg, pid); return;
         }
 
+        struct inode old_in;
+        int old_reuse = 0;
+        if (load_inode(file_inum, &old_in) == 0) old_reuse = old_in.reuse;
+
         memset(&file_in, 0, sizeof(file_in));
         file_in.type  = INODE_REGULAR;
         file_in.nlink = 1;
-        file_in.reuse = 1;   // first allocation — increment from 0
+        file_in.reuse = old_reuse + 1;;   // first allocation — increment from 0
         file_in.size  = 0;
 
         if (save_inode(file_inum, &file_in) == ERROR) {
@@ -1804,6 +1980,8 @@ static void handle_unlink(int pid, struct yfs_msg *msg) {
 
         // Return the inode number to the free inode list so it can be
         // allocated again for a future Create or MkDir.
+        cache_inode_t *ci = inode_hash_find(target_inum);
+        if (ci) { inode_hash_remove(ci); ci->valid = 0; ci->dirty = 0; }
         free_inode_num(target_inum);
 
     } else {
@@ -1855,12 +2033,16 @@ static void handle_symlink(int pid, struct yfs_msg *msg) {
         msg->arg1 = ERROR; Reply(msg, pid); return;
     }
 
+    struct inode old_in;
+    int old_reuse = 0;
+    if (load_inode(new_inum, &old_in) == 0) old_reuse = old_in.reuse;
+
     // Write the target string into the symlink's data blocks
     struct inode sym_in;
     memset(&sym_in, 0, sizeof(sym_in));
     sym_in.type  = INODE_SYMLINK;
     sym_in.nlink = 1;
-    sym_in.reuse = 1;
+    sym_in.reuse = old_reuse + 1;;
     sym_in.size  = 0;
 
     // Write the target string block by block. Since MAXPATHNAMELEN < BLOCKSIZE
