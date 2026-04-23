@@ -17,9 +17,8 @@ static int failed = 0;
     } \
 } while(0)
 
-// ================================================================
-// Helpers
-// ================================================================
+
+//helpers
 
 // Create a file and write some content to it. Returns fd or ERROR.
 static int make_file(char *path, char *content) {
@@ -42,9 +41,7 @@ static int read_file(char *path, char *buf, int bufsz) {
     return n;
 }
 
-// ================================================================
-// Test: basic link creates a second name for the same file
-// ================================================================
+//basic
 static void test_basic_link(void) {
     make_file("/basic_orig.txt", "hello");
 
@@ -58,9 +55,7 @@ static void test_basic_link(void) {
     EXPECT(strcmp(buf1, buf2) == 0, "link and original have same content");
 }
 
-// ================================================================
-// Test: nlink count reflects both names
-// ================================================================
+//increment n link
 static void test_nlink_increments(void) {
     make_file("/nlink_orig.txt", "data");
 
@@ -79,9 +74,7 @@ static void test_nlink_increments(void) {
     EXPECT(st.nlink == st2.nlink, "both names report same nlink");
 }
 
-// ================================================================
-// Test: both names point to the same inode
-// ================================================================
+//same inode
 static void test_same_inode(void) {
     make_file("/inum_orig.txt", "x");
     Link("/inum_orig.txt", "/inum_link.txt");
@@ -92,9 +85,7 @@ static void test_same_inode(void) {
     EXPECT(s1.inum == s2.inum, "both names have same inode number");
 }
 
-// ================================================================
-// Test: write through one name, read through the other
-// ================================================================
+//write from one, read from the other
 static void test_shared_data(void) {
     make_file("/shared_orig.txt", "initial");
     Link("/shared_orig.txt", "/shared_link.txt");
@@ -109,9 +100,7 @@ static void test_shared_data(void) {
     EXPECT(strcmp(buf, "modified") == 0, "write via link visible through original");
 }
 
-// ================================================================
-// Test: unlinking original leaves link intact
-// ================================================================
+//unlink original
 static void test_unlink_original(void) {
     make_file("/unlink_orig.txt", "survive");
     Link("/unlink_orig.txt", "/unlink_link.txt");
@@ -129,9 +118,7 @@ static void test_unlink_original(void) {
     EXPECT(st.nlink == 1, "nlink is 1 after original unlinked");
 }
 
-// ================================================================
-// Test: link into a different directory
-// ================================================================
+//link to a different dir
 static void test_cross_directory_link(void) {
     MkDir("/linkdir");
     make_file("/crossdir_orig.txt", "crossdir");
@@ -144,9 +131,7 @@ static void test_cross_directory_link(void) {
     EXPECT(n > 0 && strcmp(buf, "crossdir") == 0, "cross-directory link is readable");
 }
 
-// ================================================================
-// Test: multiple links to the same file
-// ================================================================
+//mutiple links
 static void test_multiple_links(void) {
     make_file("/multi_orig.txt", "multi");
     Link("/multi_orig.txt", "/multi_a.txt");
@@ -166,17 +151,13 @@ static void test_multiple_links(void) {
     EXPECT(ok, "all three link names readable with correct content");
 }
 
-// ================================================================
-// Error: link to nonexistent source
-// ================================================================
+//invalid link
 static void test_error_nonexistent_source(void) {
     int r = Link("/does_not_exist.txt", "/error_link.txt");
     EXPECT(r == ERROR, "link from nonexistent source returns ERROR");
 }
 
-// ================================================================
-// Error: newname already exists
-// ================================================================
+//existing name
 static void test_error_newname_exists(void) {
     make_file("/exists_orig.txt", "a");
     make_file("/exists_other.txt", "b");
@@ -185,27 +166,21 @@ static void test_error_newname_exists(void) {
     EXPECT(r == ERROR, "link where newname exists returns ERROR");
 }
 
-// ================================================================
-// Error: linking a directory is forbidden
-// ================================================================
+//cannot link dirs
 static void test_error_link_directory(void) {
     MkDir("/linkforbiddendir");
     int r = Link("/linkforbiddendir", "/dir_link");
     EXPECT(r == ERROR, "linking a directory returns ERROR");
 }
 
-// ================================================================
-// Error: parent directory of newname does not exist
-// ================================================================
+//bad parent
 static void test_error_bad_parent(void) {
     make_file("/badparent_orig.txt", "x");
     int r = Link("/badparent_orig.txt", "/nonexistent_dir/link.txt");
     EXPECT(r == ERROR, "link into nonexistent parent directory returns ERROR");
 }
 
-// ================================================================
-// Error: link to empty string
-// ================================================================
+//invalid
 static void test_error_empty_path(void) {
     make_file("/empty_path_orig.txt", "x");
     int r = Link("/empty_path_orig.txt", "");
@@ -215,9 +190,7 @@ static void test_error_empty_path(void) {
     EXPECT(r == ERROR, "link with empty oldname returns ERROR");
 }
 
-// ================================================================
-// Main
-// ================================================================
+
 int main(void) {
     printf("=== Link tests ===\n");
 

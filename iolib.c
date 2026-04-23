@@ -139,7 +139,7 @@ int Read(int fd, void *buf, int size){
         return ERROR;
     }
     
-    // server returns bytes_read in arg1
+    // server returns bytes_read in arg1, increment fd
     open_table[fd]->offset += msg.arg1;
     return msg.arg1;
 }

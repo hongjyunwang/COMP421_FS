@@ -6,9 +6,6 @@
 int main(void) {
     char buf[32];
 
-    printf("==== Cache Test Start ====\n");
-    fflush(stdout);
-
     //multi read, should use cache!
     int fd = Open("/a/b/f");
     if (fd == ERROR) {

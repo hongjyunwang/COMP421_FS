@@ -28,32 +28,32 @@ int main(void) {
     printf("Open(/a/b/f) -> fd %d\n", fd);
     fflush(stdout);
 
-    // --- Read first 5 bytes ---
+    //read 5 bytes
     int n = Read(fd, buf, 5);
     printf("Read 5 -> %d\n", n);
     print_buf("chunk1", buf, n);
 
-    // --- Read next 5 bytes ---
+    //next5
     n = Read(fd, buf, 5);
     printf("Read 5 -> %d\n", n);
     print_buf("chunk2", buf, n);
 
-    // --- Try reading past EOF ---
+    //past eof
     n = Read(fd, buf, 10);
     printf("Read past EOF -> %d\n", n);
     fflush(stdout);
 
-    // --- Seek back to beginning ---
+    //seek set
     int s = Seek(fd, 0, SEEK_SET);
     printf("Seek(fd, 0, SEEK_SET) -> %d\n", s);
     fflush(stdout);
 
-    // --- Read entire file ---
+    //whole file
     n = Read(fd, buf, sizeof(buf));
     printf("Read full -> %d\n", n);
     print_buf("full", buf, n);
 
-    // --- Seek relative ---
+    //relative
     s = Seek(fd, -4, SEEK_END);
     printf("Seek(fd, -4, SEEK_END) -> %d\n", s);
     fflush(stdout);
@@ -62,7 +62,6 @@ int main(void) {
     printf("Read last 4 -> %d\n", n);
     print_buf("tail", buf, n);
 
-    // --- Close ---
     int c = Close(fd);
     printf("Close(fd) -> %d\n", c);
     fflush(stdout);

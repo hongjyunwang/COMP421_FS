@@ -1544,7 +1544,7 @@ static void handle_read(int pid, struct yfs_msg *msg){
 
     int bytes_left = in.size - offset;
     if (bytes_left <= 0) {
-        msg->arg1 = 0;   // EOF
+        msg->arg1 = 0;   // EOF should return 0
         Reply(msg, pid);
         return;
     }

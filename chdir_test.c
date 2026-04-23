@@ -26,7 +26,6 @@ static void test_stat(const char *path) {
 }
 
 int main(void) {
-    printf("==== ChDir tests ====\n");
 
     test_chdir("/");
     test_stat(".");   // should be root
@@ -45,9 +44,6 @@ int main(void) {
 
     test_chdir("/a/b/f");   // NOT a directory
     test_chdir("/nosuch");  // invalid
-
-    printf("==== Done ====\n");
-    fflush(stdout);
 
     Shutdown();
     return 0;

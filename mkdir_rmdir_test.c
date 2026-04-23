@@ -37,47 +37,47 @@ static void test_rmdir(const char *path) {
 }
 
 int main(void) {
-    printf("==== MkDir / RmDir tests start ====\n");
+    printf("mkdir rmdir test\n");
     fflush(stdout);
 
-    /* Initial sanity */
+    //check
     test_stat("/");
     test_stat("/a");
     test_stat("/a/b");
 
-    /* Create /x */
+    //create
     test_mkdir("/x");
     test_stat("/x");
     test_stat("/x/.");
     test_stat("/x/..");
 
-    /* Duplicate should fail */
+    //duplicate should fail
     test_mkdir("/x");
 
-    /* Create nested /x/y */
+    //nested create
     test_mkdir("/x/y");
     test_stat("/x/y");
     test_stat("/x/y/.");
     test_stat("/x/y/..");
     test_stat("/x/y/../..");
 
-    /* Removing non-empty dir should fail */
+    //cannot remove non-empty
     test_rmdir("/x");
 
-    /* Remove child first */
+    //;remove child
     test_rmdir("/x/y");
     test_stat("/x/y");
 
-    /* Now remove parent */
+    //remove parent
     test_rmdir("/x");
     test_stat("/x");
 
-    /* Error cases */
+    // should return error
     test_rmdir("/");
     test_rmdir("/nosuch");
     test_rmdir("/a/b/f");   /* regular file, should fail */
 
-    printf("==== MkDir / RmDir tests end ====\n");
+    printf("end!\n");
     fflush(stdout);
 
     Shutdown();

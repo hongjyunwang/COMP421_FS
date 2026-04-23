@@ -17,10 +17,8 @@ static int failed = 0;
     } \
 } while(0)
 
-// ================================================================
-// Helpers
-// ================================================================
 
+//helpers
 static int make_file(char *path, char *content) {
     int fd = Create(path);
     if (fd == ERROR) return ERROR;
@@ -41,13 +39,7 @@ static int read_file(char *path, char *buf, int bufsz) {
     return n;
 }
 
-// ================================================================
-// SYMLINK TESTS
-// ================================================================
-
-// ================================================================
-// Test: basic symlink creation
-// ================================================================
+//symlink tests
 static void test_symlink_basic(void) {
     make_file("/sym_target.txt", "hello");
 
@@ -55,9 +47,6 @@ static void test_symlink_basic(void) {
     EXPECT(r == 0, "symlink creation returns 0");
 }
 
-// ================================================================
-// Test: symlink inode type is INODE_SYMLINK
-// ================================================================
 static void test_symlink_stat_type(void) {
     make_file("/sym_stat_target.txt", "data");
     SymLink("/sym_stat_target.txt", "/sym_stat_link.txt");
@@ -69,9 +58,6 @@ static void test_symlink_stat_type(void) {
     EXPECT(n > 0, "ReadLink on symlink succeeds confirming it is a symlink inode");
 }
 
-// ================================================================
-// Test: opening through a symlink reaches the target
-// ================================================================
 static void test_symlink_open_follows(void) {
     make_file("/sym_open_target.txt", "through symlink");
     SymLink("/sym_open_target.txt", "/sym_open_link.txt");
@@ -82,9 +68,6 @@ static void test_symlink_open_follows(void) {
            "open through symlink reads target content");
 }
 
-// ================================================================
-// Test: symlink to a directory — ChDir through it
-// ================================================================
 static void test_symlink_to_directory(void) {
     MkDir("/sym_dir_target");
     make_file("/sym_dir_target/inside.txt", "inside");
@@ -99,17 +82,12 @@ static void test_symlink_to_directory(void) {
            "file inside directory reachable through symlink");
 }
 
-// ================================================================
-// Test: dangling symlink — target does not exist (not an error to create)
-// ================================================================
 static void test_symlink_dangling_create(void) {
     int r = SymLink("/nonexistent_target.txt", "/dangling_link.txt");
     EXPECT(r == 0, "creating dangling symlink returns 0");
 }
 
-// ================================================================
-// Test: dangling symlink — traversing it returns ERROR
-// ================================================================
+
 static void test_symlink_dangling_traverse(void) {
     SymLink("/truly_nonexistent.txt", "/dangling_traverse_link.txt");
 
@@ -117,9 +95,6 @@ static void test_symlink_dangling_traverse(void) {
     EXPECT(fd == ERROR, "opening dangling symlink returns ERROR");
 }
 
-// ================================================================
-// Test: relative symlink target
-// ================================================================
 static void test_symlink_relative_target(void) {
     MkDir("/reldir");
     make_file("/reldir/relfile.txt", "relative");
@@ -134,9 +109,6 @@ static void test_symlink_relative_target(void) {
            "relative symlink target resolves correctly");
 }
 
-// ================================================================
-// Test: chained symlinks
-// ================================================================
 static void test_symlink_chained(void) {
     make_file("/chain_final.txt", "end of chain");
     SymLink("/chain_final.txt", "/chain_link1.txt");
@@ -148,9 +120,6 @@ static void test_symlink_chained(void) {
            "chained symlinks resolve to final target");
 }
 
-// ================================================================
-// Test: symlink and original have different inodes
-// ================================================================
 static void test_symlink_different_inode(void) {
     make_file("/sym_inum_target.txt", "x");
     SymLink("/sym_inum_target.txt", "/sym_inum_link.txt");
@@ -166,9 +135,6 @@ static void test_symlink_different_inode(void) {
     (void)st_target; (void)st_link;
 }
 
-// ================================================================
-// Error: symlink where newname already exists
-// ================================================================
 static void test_symlink_error_newname_exists(void) {
     make_file("/sym_exists_target.txt", "a");
     make_file("/sym_exists_new.txt", "b");
@@ -177,37 +143,23 @@ static void test_symlink_error_newname_exists(void) {
     EXPECT(r == ERROR, "symlink where newname exists returns ERROR");
 }
 
-// ================================================================
-// Error: symlink to empty string
-// ================================================================
 static void test_symlink_error_empty_target(void) {
     int r = SymLink("", "/sym_empty_target_link.txt");
     EXPECT(r == ERROR, "symlink to empty string returns ERROR");
 }
 
-// ================================================================
-// Error: symlink with empty newname
-// ================================================================
+
 static void test_symlink_error_empty_newname(void) {
     int r = SymLink("/some_target.txt", "");
     EXPECT(r == ERROR, "symlink with empty newname returns ERROR");
 }
 
-// ================================================================
-// Error: parent of newname does not exist
-// ================================================================
 static void test_symlink_error_bad_parent(void) {
     int r = SymLink("/target.txt", "/nonexistent_dir/link.txt");
     EXPECT(r == ERROR, "symlink into nonexistent parent returns ERROR");
 }
 
-// ================================================================
-// READLINK TESTS
-// ================================================================
-
-// ================================================================
-// Test: readlink returns the exact target string
-// ================================================================
+//readlink
 static void test_readlink_basic(void) {
     make_file("/rl_target.txt", "data");
     SymLink("/rl_target.txt", "/rl_link.txt");
@@ -220,10 +172,6 @@ static void test_readlink_basic(void) {
     EXPECT(strcmp(buf, "/rl_target.txt") == 0, "readlink returns correct target string");
 }
 
-// ================================================================
-// Test: readlink result is not null-terminated by the server
-// (we verify by checking the returned length, not strcmp)
-// ================================================================
 static void test_readlink_length(void) {
     SymLink("/length_target.txt", "/length_link.txt");
 
@@ -235,9 +183,6 @@ static void test_readlink_length(void) {
            "readlink returns length of target, not including null");
 }
 
-// ================================================================
-// Test: readlink truncates when len is smaller than target
-// ================================================================
 static void test_readlink_truncation(void) {
     SymLink("/truncation_target.txt", "/truncation_link.txt");
 
@@ -248,9 +193,6 @@ static void test_readlink_truncation(void) {
     EXPECT(n == 4, "readlink truncates to len when target is longer");
 }
 
-// ================================================================
-// Test: readlink on a dangling symlink still works
-// ================================================================
 static void test_readlink_dangling(void) {
     SymLink("/dangling_rl_target.txt", "/dangling_rl_link.txt");
 
@@ -262,9 +204,6 @@ static void test_readlink_dangling(void) {
            "readlink on dangling symlink returns target string");
 }
 
-// ================================================================
-// Test: readlink does not follow the symlink — returns the link itself
-// ================================================================
 static void test_readlink_does_not_follow(void) {
     make_file("/rl_follow_target.txt", "content");
     SymLink("/rl_follow_target.txt", "/rl_follow_link.txt");
@@ -278,9 +217,7 @@ static void test_readlink_does_not_follow(void) {
            "readlink returns target path, not file content");
 }
 
-// ================================================================
-// Test: readlink on a relative symlink target
-// ================================================================
+
 static void test_readlink_relative(void) {
     SymLink("relative/path.txt", "/rl_relative_link.txt");
 
@@ -292,9 +229,6 @@ static void test_readlink_relative(void) {
            "readlink returns relative target string as-is");
 }
 
-// ================================================================
-// Error: readlink on a regular file
-// ================================================================
 static void test_readlink_error_regular_file(void) {
     make_file("/rl_regular.txt", "not a symlink");
 
@@ -303,9 +237,6 @@ static void test_readlink_error_regular_file(void) {
     EXPECT(n == ERROR, "readlink on regular file returns ERROR");
 }
 
-// ================================================================
-// Error: readlink on a directory
-// ================================================================
 static void test_readlink_error_directory(void) {
     MkDir("/rl_dir_test");
 
@@ -314,18 +245,12 @@ static void test_readlink_error_directory(void) {
     EXPECT(n == ERROR, "readlink on directory returns ERROR");
 }
 
-// ================================================================
-// Error: readlink on nonexistent path
-// ================================================================
 static void test_readlink_error_nonexistent(void) {
     char buf[256];
     int n = ReadLink("/rl_nonexistent_link.txt", buf, sizeof(buf));
     EXPECT(n == ERROR, "readlink on nonexistent path returns ERROR");
 }
 
-// ================================================================
-// Error: readlink with len <= 0
-// ================================================================
 static void test_readlink_error_bad_len(void) {
     SymLink("/rl_badlen_target.txt", "/rl_badlen_link.txt");
 
@@ -334,9 +259,7 @@ static void test_readlink_error_bad_len(void) {
     EXPECT(n == ERROR, "readlink with len=0 returns ERROR");
 }
 
-// ================================================================
-// Main
-// ================================================================
+
 int main(void) {
     printf("=== SymLink tests ===\n");
 

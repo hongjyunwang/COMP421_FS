@@ -46,28 +46,28 @@ static void test_create_twice(const char *path) {
 
 int main(void) {
 
-    printf("=== basic creates in root ===\n");
+    printf("basic\n");
     test_create_then_stat("/newfile");
     test_create_then_stat("/newfile2");
 
-    printf("\n=== path variations (dot, double slash, trailing slash) ===\n");
+    printf("varying paths\n");
     test_create("/./newfile3");
     test_create("//newfile4");
     test_create("/newfile5/"); // ERROR — trailing slash
     test_create("/./bar"); // succeeds — /. is root
 
-    printf("\n=== expected errors ===\n");
+    printf("exptect errors\n");
     test_create("/nosuchdir/file");
     test_create("");
     test_create("/");
 
-    printf("\n=== create file then try to create inside it ===\n");
+    printf("double create\n");
     test_create("/foo");
     test_create("/foo/bar");          // ERROR — /foo is a file
     test_create("/foo/");             // ERROR — trailing slash + file
     test_create("/./foo/baz");        // ERROR — /foo is a file
 
-    printf("\n=== fd starts at position 0 ===\n");
+    printf("fd, pos0\n");
     {
         int fd = Create((char *)"/posfile");
         if (fd != ERROR) {
@@ -78,10 +78,10 @@ int main(void) {
         fflush(stdout);
     }
 
-    printf("\n=== create twice (truncate, not error) ===\n");
+    printf("double create should truncate \n");
     test_create_twice("/truncme");
 
-    printf("\n=== nlink stays 1 after truncating re-create ===\n");
+    printf("nlink should stay 1\n");
     {
         int fd = Create((char *)"/nlinkfile");
         if (fd != ERROR) Close(fd);
@@ -93,7 +93,7 @@ int main(void) {
         fflush(stdout);
     }
 
-    printf("\n=== stat after re-create shows size 0 ===\n");
+    printf("stat after re create size = 0\n");
     {
         int fd = Create((char *)"/sizefile");
         if (fd != ERROR) Close(fd);
@@ -105,7 +105,7 @@ int main(void) {
         fflush(stdout);
     }
 
-    printf("\n=== open after create ===\n");
+    printf("open after create\n");
     {
         int fd = Create((char *)"/openme");
         if (fd != ERROR) Close(fd);
@@ -119,7 +119,7 @@ int main(void) {
         fflush(stdout);
     }
 
-    printf("\n=== exhaust inodes ===\n");
+    printf("fill inodes\n");
     {
         // keep creating files until we run out of inodes
         // mkyfs gives 47 inodes; several are already used above
