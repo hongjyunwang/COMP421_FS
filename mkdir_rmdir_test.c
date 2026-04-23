@@ -73,6 +73,7 @@ int main(void) {
     test_stat("/x");
 
     // should return error
+    test_mkdir("/x/");
     test_rmdir("/");
     test_rmdir("/nosuch");
     test_rmdir("/a/b/f");   /* regular file, should fail */

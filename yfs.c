@@ -1320,7 +1320,15 @@ static void handle_chdir(int pid, struct yfs_msg *msg) {
 static void handle_mkdir(int pid, struct yfs_msg *msg) {
     char pathbuf[MAXPATHNAMELEN];
 
+
     if (CopyFrom(pid, pathbuf, msg->ptr1, MAXPATHNAMELEN) == ERROR) {
+        msg->arg1 = ERROR;
+        Reply(msg, pid);
+        return;
+    }
+    //reject trailing slash
+    int len = strlen(pathbuf);
+    if (len > 1 && pathbuf[len - 1] == '/') {
         msg->arg1 = ERROR;
         Reply(msg, pid);
         return;

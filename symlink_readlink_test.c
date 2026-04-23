@@ -261,7 +261,7 @@ static void test_readlink_error_bad_len(void) {
 
 
 int main(void) {
-    printf("=== SymLink tests ===\n");
+    printf("symlink tests\n");
 
     test_symlink_basic();
     test_symlink_stat_type();
@@ -277,7 +277,7 @@ int main(void) {
     test_symlink_error_empty_newname();
     test_symlink_error_bad_parent();
 
-    printf("\n=== ReadLink tests ===\n");
+    printf("readlink\n");
 
     test_readlink_basic();
     test_readlink_length();
@@ -290,7 +290,7 @@ int main(void) {
     test_readlink_error_nonexistent();
     test_readlink_error_bad_len();
 
-    printf("\n=== Results: %d passed, %d failed ===\n", passed, failed);
+    printf("Results: %d passed, %d failed ===\n", passed, failed);
     Shutdown();
     return 0;
 }
